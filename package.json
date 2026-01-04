@@ -3,7 +3,7 @@
   "name": "notion-snippet-injector",
   "title": "Notion Snippet Injector",
   "description": "Inject snippets from multiple Notion databases with dynamic placeholders.",
-  "icon": "icon.png",
+  "icon": "notion-icon.png",
   "author": "curiosita",
   "license": "MIT",
   "commands": [
@@ -11,6 +11,12 @@
       "name": "index",
       "title": "Search Snippets",
       "description": "Search and inject snippets from Notion",
+      "mode": "view"
+    },
+    {
+      "name": "create",
+      "title": "Create Snippet",
+      "description": "Create a new snippet in Notion",
       "mode": "view"
     }
   ],
