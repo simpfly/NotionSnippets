@@ -1,0 +1,57 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "notion-snippet-injector",
+  "title": "Notion Snippet Injector",
+  "description": "Inject snippets from multiple Notion databases with dynamic placeholders.",
+  "icon": "icon.png",
+  "author": "curiosita",
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "index",
+      "title": "Search Snippets",
+      "description": "Search and inject snippets from Notion",
+      "mode": "view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "notionToken",
+      "title": "Notion API Token",
+      "description": "Internal Integration Token from Notion",
+      "type": "password",
+      "required": true,
+      "placeholder": "secret_..."
+    },
+    {
+      "name": "databaseIds",
+      "title": "Database IDs",
+      "description": "Comma-separated list of Notion Database IDs",
+      "type": "textfield",
+      "required": true,
+      "placeholder": "id1, id2, ..."
+    }
+  ],
+  "dependencies": {
+    "@notionhq/client": "^2.2.15",
+    "@raycast/api": "^1.104.1",
+    "@raycast/utils": "^1.19.0",
+    "@types/uuid": "^10.0.0",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^1.0.8",
+    "@types/node": "20.8.10",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.4.5"
+  },
+  "scripts": {
+    "dev": "ray develop",
+    "fix-lint": "ray lint --fix",
+    "lint": "ray lint",
+    "publish": "ray publish"
+  }
+}
