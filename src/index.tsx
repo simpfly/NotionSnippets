@@ -1,4 +1,4 @@
-import { ActionPanel, Action, List, useNavigation, Clipboard, showToast, Toast, open, Icon, getPreferenceValues, confirmAlert, Alert } from "@raycast/api"; 
+import { ActionPanel, Action, List, useNavigation, Clipboard, showToast, Toast, open, Icon, getPreferenceValues, confirmAlert, Alert, Color } from "@raycast/api"; 
 import { useCachedState } from "@raycast/utils";
 import { useEffect, useState } from "react";
 import { fetchSnippets } from "./api/notion";
@@ -20,6 +20,12 @@ export default function Command() {
   const [searchText, setSearchText] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [dbStatus, setDbStatus] = useState<string>("Initializing...");
+  
+/**
+ * ... (skipping unchanged lines for brevity in tool call, will target specific lines)
+ */
+
+
   
   // Hooks
   const { push } = useNavigation();
@@ -237,7 +243,7 @@ export default function Command() {
           icon={Icon.Text}
           title={snippet.name}
           keywords={snippet.trigger ? [snippet.trigger] : []}
-          accessories={snippet.trigger ? [{ tag: { value: snippet.trigger } }] : []}
+          accessories={snippet.trigger ? [{ tag: { value: snippet.trigger, color: Color.Magenta } }] : []}
           detail={
             <List.Item.Detail 
               markdown={snippet.content}
