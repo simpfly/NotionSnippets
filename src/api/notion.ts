@@ -162,7 +162,8 @@ export async function fetchSnippets(): Promise<Snippet[]> {
                 content,
                 trigger,
                 description,
-                sourceDb: dbName, 
+                sourceDb: dbName,
+                databaseId: dbId, 
               });
             }
           }

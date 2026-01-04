@@ -5,6 +5,7 @@ export interface Snippet {
   trigger?: string;
   description?: string;
   sourceDb?: string;
+  databaseId?: string;
 }
 
 export interface Preferences {

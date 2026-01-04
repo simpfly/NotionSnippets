@@ -24,6 +24,12 @@ export default function FillerForm({ snippet, placeholders }: Props) {
         </ActionPanel>
       }
     >
+      <Form.Description 
+        title="Preview"
+        text={snippet.content.replace(/(\{?\{{1,2}.*?\}{1,2}\}?)/g, "**`$1`**")} 
+      />
+      <Form.Separator />
+      
       <Form.Description text={`Filling placeholders for: ${snippet.name}`} />
       {placeholders.map((placeholder) => (
         <Form.TextField

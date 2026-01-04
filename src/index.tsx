@@ -1,7 +1,7 @@
 import { ActionPanel, Action, List, useNavigation, Clipboard, showToast, Toast, open, Icon, getPreferenceValues, confirmAlert, Alert, Color } from "@raycast/api"; 
 import { useCachedState } from "@raycast/utils";
 import { useEffect, useState } from "react";
-import { fetchSnippets } from "./api/notion";
+import { fetchSnippets, fetchDatabases } from "./api/notion";
 import { Snippet, Preferences } from "./types/index";
 import { parsePlaceholders, processOfficialPlaceholders } from "./utils/placeholder";
 import SnippetForm from "./components/SnippetForm";
@@ -16,6 +16,8 @@ export default function Command() {
 
   // State
   const [snippets, setSnippets] = useCachedState<Snippet[]>("notion-snippets", []);
+  const [databases, setDatabases] = useState<{ id: string; title: string }[]>([]);
+  const [selectedDbId, setSelectedDbId] = useState<string>("all");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [searchText, setSearchText] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -37,11 +39,12 @@ export default function Command() {
       setIsLoading(true);
       try {
         console.log("Index: Calling fetchSnippets()...");
-        const data = await fetchSnippets();
+        const [data, dbs] = await Promise.all([fetchSnippets(), fetchDatabases()]);
         if (isMounted) {
           const safeData = data || [];
           console.log(`Index: fetchSnippets returned ${safeData.length} items`);
           setSnippets(safeData);
+          setDatabases(dbs);
           setDbStatus(safeData.length > 0 ? `Loaded ${safeData.length} snippets` : "No snippets found.");
         }
       } catch (error) {
@@ -173,6 +176,20 @@ export default function Command() {
           setSelectedIds([ids as string]);
         }
       }}
+      searchBarAccessory={
+        <List.Dropdown
+          tooltip="Filter by Database"
+          storeValue={true}
+          onChange={(newValue) => setSelectedDbId(newValue)}
+        >
+          <List.Dropdown.Section title="Databases">
+            <List.Dropdown.Item title="All Snippets" value="all" />
+            {databases.map((db) => (
+              <List.Dropdown.Item key={db.id} title={db.title} value={db.id} />
+            ))}
+          </List.Dropdown.Section>
+        </List.Dropdown>
+      }
     >
       <List.EmptyView
         title="Sync Status"
@@ -190,9 +207,10 @@ export default function Command() {
               icon={Icon.Repeat}
               onAction={() => {
                 setIsLoading(true);
-                fetchSnippets().then(data => {
+                Promise.all([fetchSnippets(), fetchDatabases()]).then(([data, dbs]) => {
                   const safeData = data || [];
                   setSnippets(safeData);
+                  setDatabases(dbs);
                   setDbStatus(safeData.length > 0 ? `Loaded ${safeData.length} snippets` : "Still no snippets found.");
                   setIsLoading(false);
                 });
@@ -209,6 +227,8 @@ export default function Command() {
       />
       {(snippets || [])
         .filter((snippet) => {
+          if (selectedDbId !== "all" && snippet.databaseId !== selectedDbId) return false;
+
           if (!searchText) return true;
           const lowerSearch = searchText.toLowerCase();
           const lowerName = (snippet.name || "").toLowerCase();
@@ -236,33 +256,53 @@ export default function Command() {
 
           return 0;
         })
-        .map((snippet) => (
-        <List.Item
-          key={snippet.id}
-          id={snippet.id}
-          icon={Icon.Text}
-          title={snippet.name}
-          keywords={snippet.trigger ? [snippet.trigger] : []}
-          accessories={snippet.trigger ? [{ tag: { value: snippet.trigger, color: Color.Magenta } }] : []}
-          detail={
-            <List.Item.Detail 
-              markdown={snippet.content}
-              metadata={
-                <List.Item.Detail.Metadata>
-                  <List.Item.Detail.Metadata.Label title="Information" />
-                  <List.Item.Detail.Metadata.Label title="Name" text={snippet.name} />
-                  {snippet.trigger && (
-                    <List.Item.Detail.Metadata.Label title="Trigger" text={snippet.trigger} />
-                  )}
-                  <List.Item.Detail.Metadata.Label title="Content Type" text="Text" />
-                  <List.Item.Detail.Metadata.Separator />
-                  <List.Item.Detail.Metadata.Label title="Source" text={snippet.sourceDb} />
-                </List.Item.Detail.Metadata>
+        .map((snippet) => {
+          const placeholders = parsePlaceholders(snippet.content);
+          // Highlight placeholders: {{key}} -> `{{key}}` (using code style for visibility)
+          // We use a regex that matches either {key} or {{key}} and wraps it in backticks and bold
+          const highlightedContent = snippet.content.replace(/(\{?\{{1,2}.*?\}{1,2}\}?)/g, "**`$1`**");
+
+          return (
+            <List.Item
+              key={snippet.id}
+              id={snippet.id}
+              icon={Icon.Text}
+              title={snippet.name}
+              keywords={snippet.trigger ? [snippet.trigger] : []}
+              accessories={snippet.trigger ? [{ tag: { value: snippet.trigger, color: Color.Blue } }] : []}
+              detail={
+                <List.Item.Detail 
+                  markdown={highlightedContent}
+                  metadata={
+                    <List.Item.Detail.Metadata>
+                      <List.Item.Detail.Metadata.Label title="Information" />
+                      <List.Item.Detail.Metadata.Label title="Name" text={snippet.name} />
+                      {snippet.trigger && (
+                        <List.Item.Detail.Metadata.Label title="Trigger" text={snippet.trigger} />
+                      )}
+                      
+                      {placeholders.length > 0 && (
+                        <>
+                          <List.Item.Detail.Metadata.Separator />
+                          <List.Item.Detail.Metadata.Label title="Variables" />
+                          {placeholders.map((p) => (
+                            <List.Item.Detail.Metadata.Label 
+                              key={p} 
+                              title={p} 
+                              icon={{ source: Icon.Pencil, tintColor: Color.Orange }}
+                            />
+                          ))}
+                        </>
+                      )}
+
+                      <List.Item.Detail.Metadata.Separator />
+                      <List.Item.Detail.Metadata.Label title="Source" text={snippet.sourceDb} />
+                    </List.Item.Detail.Metadata>
+                  }
+                />
               }
-            />
-          }
-          actions={
-            <ActionPanel>
+              actions={
+                <ActionPanel>
               <ActionPanel.Section>
                 <Action title="Paste Snippet" icon={Icon.Clipboard} onAction={() => handleSelect(snippet)} />
                 <Action.CreateSnippet
@@ -301,7 +341,8 @@ export default function Command() {
             </ActionPanel>
           }
         />
-      ))}
+      );
+    })}
     </List>
   );
 }
