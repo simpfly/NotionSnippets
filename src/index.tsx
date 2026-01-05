@@ -549,11 +549,62 @@ export default function Command() {
     }
   };
 
+  const filteredAndSortedSnippets = useMemo(() => {
+    return (snippetIndexes || [])
+      .filter((snippet) => {
+        if (selectedDbId !== "all" && snippet.databaseId !== selectedDbId) return false;
+
+        if (!searchText) return true;
+        const lowerSearch = searchText.toLowerCase();
+        const lowerName = (snippet.name || "").toLowerCase();
+        const lowerTrigger = (snippet.trigger || "").toLowerCase();
+        const lowerDesc = (snippet.description || "").toLowerCase();
+        const lowerContent = (snippet.contentPreview || "").toLowerCase();
+        
+        // Match name, trigger, description, or content
+        if (
+          lowerName.includes(lowerSearch) || 
+          lowerTrigger.includes(lowerSearch) ||
+          lowerDesc.includes(lowerSearch) ||
+          lowerContent.includes(lowerSearch)
+        ) return true;
+
+        // Trigger + argument match
+        if (snippet.trigger && lowerSearch.startsWith(lowerTrigger + " ")) return true;
+        
+        return false;
+      })
+      .sort((a, b) => {
+        // Exact trigger match
+        if (searchText && a.trigger === searchText) return -1;
+        if (searchText && b.trigger === searchText) return 1;
+        
+        // Case-insensitive trigger match
+        if (searchText && a.trigger?.toLowerCase() === searchText.toLowerCase()) return -1;
+        if (searchText && b.trigger?.toLowerCase() === searchText.toLowerCase()) return 1;
+
+        // Usage Count (High to Low)
+        const usageA = a.usageCount || 0;
+        const usageB = b.usageCount || 0;
+        if (usageA !== usageB) return usageB - usageA;
+
+        // Last Used (Recent first)
+        const dateA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
+        const dateB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
+        if (dateA !== dateB) return dateB - dateA;
+
+        // Name alphabetical
+        return a.name.localeCompare(b.name);
+      });
+  }, [snippetIndexes, selectedDbId, searchText]);
+
   const exportSelectedAndReveal = async () => {
     try {
-      const indexesToExport = (selectedIds?.length || 0) > 0 
+      // If only 1 item is selected (the focused one), we assume the user wants to export ALL VISIBLE snippets.
+      // This respects the current filters (Database, Search Text).
+      const indexesToExport = (selectedIds?.length || 0) > 1
         ? snippetIndexes.filter(s => selectedIds.includes(s.id))
-        : snippetIndexes;
+        : filteredAndSortedSnippets;
       
       // Load full content for export
       const itemsToExport = await Promise.all(
@@ -608,54 +659,6 @@ export default function Command() {
     }
   };
 
-  const filteredAndSortedSnippets = useMemo(() => {
-    return (snippetIndexes || [])
-      .filter((snippet) => {
-        if (selectedDbId !== "all" && snippet.databaseId !== selectedDbId) return false;
-
-        if (!searchText) return true;
-        const lowerSearch = searchText.toLowerCase();
-        const lowerName = (snippet.name || "").toLowerCase();
-        const lowerTrigger = (snippet.trigger || "").toLowerCase();
-        const lowerDesc = (snippet.description || "").toLowerCase();
-        const lowerContent = (snippet.contentPreview || "").toLowerCase();
-        
-        // Match name, trigger, description, or content
-        if (
-          lowerName.includes(lowerSearch) || 
-          lowerTrigger.includes(lowerSearch) ||
-          lowerDesc.includes(lowerSearch) ||
-          lowerContent.includes(lowerSearch)
-        ) return true;
-
-        // Trigger + argument match
-        if (snippet.trigger && lowerSearch.startsWith(lowerTrigger + " ")) return true;
-        
-        return false;
-      })
-      .sort((a, b) => {
-        // Exact trigger match
-        if (searchText && a.trigger === searchText) return -1;
-        if (searchText && b.trigger === searchText) return 1;
-        
-        // Case-insensitive trigger match
-        if (searchText && a.trigger?.toLowerCase() === searchText.toLowerCase()) return -1;
-        if (searchText && b.trigger?.toLowerCase() === searchText.toLowerCase()) return 1;
-
-        // Usage Count (High to Low)
-        const usageA = a.usageCount || 0;
-        const usageB = b.usageCount || 0;
-        if (usageA !== usageB) return usageB - usageA;
-
-        // Last Used (Recent first)
-        const dateA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
-        const dateB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
-        if (dateA !== dateB) return dateB - dateA;
-
-        // Name alphabetical
-        return a.name.localeCompare(b.name);
-      });
-  }, [snippetIndexes, selectedDbId, searchText]);
 
   const dbCounts = useMemo(() => {
     const counts: Record<string, number> = {};
