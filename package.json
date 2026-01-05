@@ -22,6 +22,14 @@
   ],
   "preferences": [
     {
+      "name": "showMetadata",
+      "type": "checkbox",
+      "required": false,
+      "label": "Show Metadata Sidebar",
+      "description": "Show the metadata sidebar (variables, info) in the detail view. Uncheck to maximize preview width.",
+      "default": true
+    },
+    {
       "name": "notionToken",
       "title": "Notion API Token",
       "description": "Internal Integration Token from Notion",

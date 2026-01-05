@@ -8,6 +8,8 @@
 /* eslint-disable @typescript-eslint/ban-types */
 
 type ExtensionPreferences = {
+  /** undefined - Show the metadata sidebar (variables, info) in the detail view. Uncheck to maximize preview width. */
+  "showMetadata": boolean,
   /** Notion API Token - Internal Integration Token from Notion */
   "notionToken": string,
   /** Database IDs - Comma-separated list of Notion Database IDs */

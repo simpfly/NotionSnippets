@@ -6,9 +6,11 @@ export interface Snippet {
   description?: string;
   sourceDb?: string;
   databaseId?: string;
+  preview?: string;
 }
 
 export interface Preferences {
   notionToken: string;
   databaseIds: string;
+  showMetadata: boolean;
 }

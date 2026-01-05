@@ -131,6 +131,8 @@ export async function fetchSnippets(): Promise<Snippet[]> {
                }
             } catch (e) { console.log("Error extracting trigger", e); }
 
+
+
             // Extract Description
             let description = undefined;
             try {
@@ -138,6 +140,23 @@ export async function fetchSnippets(): Promise<Snippet[]> {
                   description = (descProp as any).rich_text[0]?.plain_text;
                }
             } catch (e) { console.log("Error extracting description", e); }
+
+            // Extract Preview Image
+            const previewProp = findProp(["preview", "image", "thumb", "picture", "预览图", "img", "pic"]);
+            let preview = undefined;
+            try {
+               if (previewProp?.type === "files" && Array.isArray((previewProp as any).files)) {
+                  const files = (previewProp as any).files;
+                  if (files.length > 0) {
+                     const fileObj = files[0];
+                     if (fileObj.type === "file") {
+                        preview = fileObj.file?.url;
+                     } else if (fileObj.type === "external") {
+                        preview = fileObj.external?.url;
+                     }
+                  }
+               }
+            } catch (e) { console.log("Error extracting preview image", e); }
 
             // Fallback: If content is empty, use description as content
             if (!content && description) {
@@ -163,7 +182,8 @@ export async function fetchSnippets(): Promise<Snippet[]> {
                 trigger,
                 description,
                 sourceDb: dbName,
-                databaseId: dbId, 
+                databaseId: dbId,
+                preview, 
               });
             }
           }

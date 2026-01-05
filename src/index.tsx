@@ -15,6 +15,8 @@ export default function Command() {
   console.log("Rendering Notion Snippets Command");
 
   // State
+  const preferences = getPreferenceValues<Preferences>();
+  const [showMetadata, setShowMetadata] = useCachedState<boolean>("show-metadata", preferences.showMetadata);
   const [snippets, setSnippets] = useCachedState<Snippet[]>("notion-snippets", []);
   const [databases, setDatabases] = useState<{ id: string; title: string }[]>([]);
   const [selectedDbId, setSelectedDbId] = useState<string>("all");
@@ -31,7 +33,6 @@ export default function Command() {
   
   // Hooks
   const { push } = useNavigation();
-  const preferences = getPreferenceValues<Preferences>();
 
   useEffect(() => {
     let isMounted = true;
@@ -222,6 +223,12 @@ export default function Command() {
               shortcut={{ modifiers: ["cmd"], key: "n" }}
               onAction={() => push(<SnippetForm onSuccess={refreshSnippets} />)}
             />
+            <Action 
+              title={showMetadata ? "Hide Metadata" : "Show Metadata"}
+              icon={showMetadata ? Icon.EyeDisabled : Icon.Eye}
+              shortcut={{ modifiers: ["cmd", "shift"], key: "d" }}
+              onAction={() => setShowMetadata(!showMetadata)}
+            />
           </ActionPanel>
         }
       />
@@ -260,7 +267,11 @@ export default function Command() {
           const placeholders = parsePlaceholders(snippet.content);
           // Highlight placeholders: {{key}} -> `{{key}}` (using code style for visibility)
           // We use a regex that matches either {key} or {{key}} and wraps it in backticks and bold
-          const highlightedContent = snippet.content.replace(/(\{?\{{1,2}.*?\}{1,2}\}?)/g, "**`$1`**");
+          let highlightedContent = snippet.content.replace(/(\{?\{{1,2}.*?\}{1,2}\}?)/g, "**`$1`**");
+
+          if (snippet.preview) {
+            highlightedContent += `\n\n![Preview](${snippet.preview})`;
+          }
 
           return (
             <List.Item
@@ -274,6 +285,7 @@ export default function Command() {
                 <List.Item.Detail 
                   markdown={highlightedContent}
                   metadata={
+                    showMetadata ? (
                     <List.Item.Detail.Metadata>
                       <List.Item.Detail.Metadata.Label title="Information" />
                       <List.Item.Detail.Metadata.Label title="Name" text={snippet.name} />
@@ -298,6 +310,7 @@ export default function Command() {
                       <List.Item.Detail.Metadata.Separator />
                       <List.Item.Detail.Metadata.Label title="Source" text={snippet.sourceDb} />
                     </List.Item.Detail.Metadata>
+                    ) : undefined
                   }
                 />
               }
@@ -305,6 +318,12 @@ export default function Command() {
                 <ActionPanel>
               <ActionPanel.Section>
                 <Action title="Paste Snippet" icon={Icon.Clipboard} onAction={() => handleSelect(snippet)} />
+                <Action 
+                  title={showMetadata ? "Hide Metadata" : "Show Metadata"}
+                  icon={showMetadata ? Icon.EyeDisabled : Icon.Eye}
+                  shortcut={{ modifiers: ["cmd", "shift"], key: "d" }}
+                  onAction={() => setShowMetadata(!showMetadata)}
+                />
                 <Action.CreateSnippet
                   title="Sync to Official (Native)"
                   icon={Icon.PlusCircle}
