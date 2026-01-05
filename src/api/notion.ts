@@ -18,6 +18,19 @@ function mapNotionColor(notionColor: string): string | undefined {
   return map[notionColor.toLowerCase()];
 }
 
+async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
+  try {
+    return await fn();
+  } catch (error: any) {
+    if (retries > 0 && (error.code === "ECONNRESET" || error.status === 502 || error.status === 429)) {
+       console.log(`Retrying after error: ${error.code || error.status}. Retries left: ${retries}`);
+       await new Promise(res => setTimeout(res, delay));
+       return withRetry(fn, retries - 1, delay * 2);
+    }
+    throw error;
+  }
+}
+
 function extractIcon(iconObj: any): string | undefined {
   if (!iconObj) return undefined;
   if (iconObj.type === "emoji") return iconObj.emoji;
@@ -26,240 +39,225 @@ function extractIcon(iconObj: any): string | undefined {
   return undefined;
 }
 
-export async function fetchSnippets(): Promise<Snippet[]> {
+export async function fetchSnippets(onProgress?: (count: number) => void, onBatch?: (snippets: Snippet[]) => void): Promise<Snippet[]> {
   console.log("fetchSnippets: Function called");
-  let preferences: Preferences;
+  const preferences = getPreferenceValues<Preferences>();
+  const notion = new Client({ auth: preferences.notionToken });
+
+  const dbIdsRaw = (preferences.databaseIds || "").replace(/[\[\]"']/g, "").split(",");
+  const dbIds = Array.from(new Set(dbIdsRaw.map((id) => id.trim()).filter(id => id.length > 5)));
   
-  try {
-    preferences = getPreferenceValues<Preferences>();
-    console.log("fetchSnippets: Preferences loaded", { 
-      hasToken: !!preferences.notionToken, 
-      dbIdsLen: preferences.databaseIds?.length 
-    });
-  } catch (e) {
-    console.error("fetchSnippets: Failed to load preferences", e);
-    throw new Error("Failed to load Raycast preferences. Please check your extension settings.");
-  }
+  console.log(`fetchSnippets: Starting parallel fetch for ${dbIds.length} databases`);
 
-  let notion: Client;
-  try {
-    notion = new Client({ auth: preferences.notionToken });
-    console.log("fetchSnippets: Notion Client initialized");
-  } catch (e) {
-    console.error("fetchSnippets: Failed to init Notion Client", e);
-    throw new Error("Invalid Notion Token.");
-  }
-
-  const dbIds = (preferences.databaseIds || "").replace(/[\[\]"']/g, "").split(",").map((id) => id.trim()).filter(id => id.length > 0);
-  console.log(`fetchSnippets: Parsing ${dbIds.length} Database IDs`);
-
-  const allSnippets: Snippet[] = [];
-
-  for (const dbId of dbIds) {
-    if (!dbId || dbId.length < 5) continue;
-
+  let totalFound = 0;
+  let totalExtracted = 0;
+  const fetchTasks = dbIds.map(async (dbId) => {
     try {
-      // Fetch database details once per database
-      let dbName = dbId;
-      let dbIcon = undefined;
-      try {
-        const dbInfo = await notion.databases.retrieve({ database_id: dbId });
-        if ("title" in dbInfo && Array.isArray(dbInfo.title) && dbInfo.title.length > 0) {
-          dbName = dbInfo.title[0].plain_text;
-        } else if ("title" in dbInfo && Array.isArray(dbInfo.title)) {
-          dbName = "Untitled Database";
-        }
-        dbIcon = extractIcon((dbInfo as any).icon);
-      } catch (e) {
-        console.warn(`Could not fetch title or icon for DB ${dbId}`, e);
-      }
-
+      console.log(`fetchSnippets: [${dbId}] Starting fetch...`);
+      const snippets: Snippet[] = [];
       let hasMore = true;
       let startCursor: string | undefined = undefined;
+      let pageCount = 0;
 
-      while (hasMore) {
-        console.log(`fetchSnippets: Querying database ${dbId} ("${dbName}") with cursor ${startCursor}...`);
-        const response = await notion.databases.query({
+      while (hasMore && pageCount < 100) { // Safety break
+        pageCount++;
+        console.log(`fetchSnippets: [${dbId}] Querying page ${pageCount} (cursor: ${startCursor || "start"})`);
+        const response = await withRetry(() => notion.databases.query({
           database_id: dbId,
           start_cursor: startCursor,
-        });
+        }));
 
-        console.log(`fetchSnippets: Database ${dbId} ("${dbName}") responded. Results: ${response.results.length}`);
-
-        if (response.results.length === 0) {
-          console.warn(`Database ${dbId} returned 0 results.`);
-          // Only show toast if it's the first page and empty
-          if (!startCursor) { 
-             showToast({
-              style: Toast.Style.Animated,
-              title: "Database Empty or Hidden",
-              message: `DB: ${dbName} returned zero items.`,
-            });
-          }
-        }
-
+        console.log(`fetchSnippets: [${dbId}] Received page ${pageCount} (${response.results.length} results)`);
+        
+        let pageExtracted = 0;
         for (const page of response.results) {
           if ("properties" in page) {
-            const props = (page as any).properties;
-
-            const findProp = (names: string[]) => {
-              if (!props) return undefined;
-              const match = Object.keys(props).find((key) => names.includes(key.toLowerCase()));
-              return match ? props[match] : undefined;
-            };
-
-            const nameProp = findProp(["name", "title", "label", "snippet name", "标题", "名称", "snippet title"]);
-            const contentProp = findProp(["content", "body", "text", "snippet content", "value", "内容", "正文", "snippet text"]);
-            const triggerProp = findProp(["trigger", "shortcut", "key", "keyword", "触发词", "快捷键", "snippet trigger", "trigger word"]);
-            const descProp = findProp(["description", "desc", "info", "notes", "描述", "备注", "snippet description"]);
-
-            // Extract Name
-            let name = "Untitled";
-            try {
-               if (nameProp?.type === "title" && Array.isArray((nameProp as any).title)) {
-                  name = (nameProp as any).title[0]?.plain_text || "Untitled";
-               } else if (nameProp?.type === "rich_text" && Array.isArray((nameProp as any).rich_text)) {
-                  name = (nameProp as any).rich_text[0]?.plain_text || "Untitled";
-               }
-            } catch (e) {
-               console.log("Error extracting name property", e);
-            }
-
-            // Extract Content
-            let content = "";
-            try {
-               if (contentProp?.type === "rich_text" && Array.isArray((contentProp as any).rich_text)) {
-                 content = (contentProp as any).rich_text.map((t: any) => t?.plain_text || "").join("");
-               } else if (contentProp?.type === "title" && Array.isArray((contentProp as any).title)) {
-                 content = (contentProp as any).title.map((t: any) => t?.plain_text || "").join("");
-               } else if (contentProp?.type === "url") {
-                 content = (contentProp as any).url || "";
-               }
-            } catch (e) {
-               console.log("Error extracting content property", e);
-            }
-
-            // Extract Type and Status
-            let type, typeColor, status, statusColor;
-            
-            const typeProp = findProp(["type", "category", "label", "tag", "类型", "分类", "标签"]);
-            if (typeProp?.type === "select" && typeProp.select) {
-              type = typeProp.select.name;
-              typeColor = mapNotionColor(typeProp.select.color);
-            } else if (typeProp?.type === "multi_select" && typeProp.multi_select?.[0]) {
-               type = typeProp.multi_select[0].name;
-               typeColor = mapNotionColor(typeProp.multi_select[0].color);
-            }
-
-            const statusProp = findProp(["status", "state", "stage", "状态", "阶段"]);
-            if (statusProp?.type === "status" && statusProp.status) {
-              status = statusProp.status.name;
-              statusColor = mapNotionColor(statusProp.status.color);
-            } else if (statusProp?.type === "select" && statusProp.select) {
-              status = statusProp.select.name;
-              statusColor = mapNotionColor(statusProp.select.color);
-            }
-
-            // Extract Trigger
-            let trigger = undefined;
-            try {
-               if (triggerProp?.type === "rich_text" && Array.isArray((triggerProp as any).rich_text)) {
-                  trigger = (triggerProp as any).rich_text[0]?.plain_text;
-               } else if (triggerProp?.type === "title" && Array.isArray((triggerProp as any).title)) {
-                  trigger = (triggerProp as any).title[0]?.plain_text;
-               }
-            } catch (e) { console.log("Error extracting trigger", e); }
-
-
-
-            // Extract Description
-            let description = undefined;
-            try {
-               if (descProp?.type === "rich_text" && Array.isArray((descProp as any).rich_text)) {
-                  description = (descProp as any).rich_text[0]?.plain_text;
-               }
-            } catch (e) { console.log("Error extracting description", e); }
-
-            // Extract Usage Stats
-            const usageProp = findProp(["usage count", "usage", "count", "times used", "copy count", "使用次数", "使用", "次数"]);
-            const lastUsedProp = findProp(["last used", "last used at", "recent", "time", "date", "最后使用", "时间", "日期"]);
-
-            let usageCount = 0;
-            if (usageProp?.type === "number") {
-               usageCount = (usageProp as any).number || 0;
-            }
-
-            let lastUsed = undefined;
-            if (lastUsedProp?.type === "date") {
-               lastUsed = (lastUsedProp as any).date?.start;
-            }
-
-            // Extract Preview Image
-            const previewProp = findProp(["preview", "image", "thumb", "picture", "预览图", "img", "pic"]);
-            let preview = undefined;
-            try {
-               if (previewProp?.type === "files" && Array.isArray((previewProp as any).files)) {
-                  const files = (previewProp as any).files;
-                  if (files.length > 0) {
-                     const fileObj = files[0];
-                     if (fileObj.type === "file") {
-                        preview = fileObj.file?.url;
-                     } else if (fileObj.type === "external") {
-                        preview = fileObj.external?.url;
-                     }
-                  }
-               }
-            } catch (e) { console.log("Error extracting preview image", e); }
-
-            // Fallback: If content is empty, use description as content
-            if (!content && description) {
-              console.log(`Using description as content for snippet: ${name}`);
-              content = description;
-            }
-
-            // Fallback: If name is "Untitled", use first sentence of content
-            if ((!name || name === "Untitled") && content) {
-               const firstLine = content.split('\n')[0];
-               // Split by common punctuation (English and CJK)
-               const firstSentence = firstLine.split(/[.!?。！？]/)[0];
-               name = firstSentence.substring(0, 30).trim();
-               if (firstLine.length > 30) name += "...";
-               if (!name) name = "Untitled"; 
-            }
-
-            if (content) {
-              allSnippets.push({
-                id: page.id,
-                name,
-                content,
-                trigger,
-                description,
-                databaseId: dbId,
-                preview, 
-                usageCount,
-                lastUsed,
-                url: (page as any).url,
-                type,
-                typeColor,
-                status,
-                statusColor,
-              });
+            const snippet = extractSnippetFromPage(page, dbId);
+            if (snippet) {
+              snippets.push(snippet);
+              pageExtracted++;
             }
           }
         }
-      } // End while loop
+
+        totalFound += response.results.length;
+        totalExtracted += pageExtracted;
+        
+        console.log(`fetchSnippets: [${dbId}] Extracted ${pageExtracted}/${response.results.length} from this page`);
+
+        if (onBatch && pageExtracted > 0) {
+          onBatch(snippets.slice(-pageExtracted));
+        }
+        
+        if (onProgress) onProgress(totalExtracted);
+
+        hasMore = response.has_more;
+        startCursor = response.next_cursor || undefined;
+      }
+      
+      if (pageCount >= 100) {
+        console.warn(`fetchSnippets: [${dbId}] Safety break hit at 100 pages. Possible infinite loop?`);
+      }
+
+      console.log(`fetchSnippets: [${dbId}] Completed. Collected ${snippets.length} total.`);
+      return snippets;
     } catch (error: any) {
-      console.error(`fetchSnippets: Error processing DB ${dbId}:`, error);
-      showToast({
-        style: Toast.Style.Failure,
-        title: "Notion Sync Error",
-        message: error.message || String(error),
-      });
+      console.error(`fetchSnippets: [${dbId}] Error:`, error);
+      return [];
     }
+  });
+
+  const results = await Promise.all(fetchTasks);
+  const allSnippets = results.flat();
+  console.log(`fetchSnippets: Sync Finished. Total Results: ${totalFound}, Successfully Extracted: ${allSnippets.length}`);
+  return allSnippets;
+}
+
+function extractSnippetFromPage(page: any, dbId: string): Snippet | null {
+  const props = page.properties;
+  if (!props) return null;
+
+  const findProp = (names: string[]) => {
+    for (const name of names) {
+      const match = Object.keys(props).find((key) => key.toLowerCase() === name);
+      if (match) return props[match];
+    }
+    return undefined;
+  };
+
+  const nameProp = findProp(["name", "title", "label", "snippet name", "标题", "名称", "snippet title", "task", "subject"]);
+  const contentProp = findProp([
+    "content", "body", "text", "snippet content", "value", "内容", "正文", "snippet text",
+    "url", "website", "href", "link", "summary", "ai summary", "dic", "description", "desc"
+  ]);
+  const triggerProp = findProp(["trigger", "shortcut", "key", "keyword", "触发词", "快捷键", "snippet trigger", "trigger word", "alias"]);
+  const descProp = findProp(["description", "desc", "info", "notes", "描述", "备注", "snippet description", "summary"]);
+
+  let name = "Untitled";
+  try {
+    if (nameProp?.type === "title" && Array.isArray(nameProp.title)) {
+      name = nameProp.title[0]?.plain_text || "Untitled";
+    } else if (nameProp?.type === "rich_text" && Array.isArray(nameProp.rich_text)) {
+      name = nameProp.rich_text[0]?.plain_text || "Untitled";
+    } else {
+       // FALLBACK: Find ANY title or rich_text property if specific ones aren't found
+       const anyTitleKey = Object.keys(props).find(k => props[k].type === "title");
+       if (anyTitleKey && props[anyTitleKey].title?.[0]) {
+         name = props[anyTitleKey].title[0].plain_text || "Untitled";
+       }
+    }
+  } catch (e) { /* silent */ }
+
+  let content = "";
+  try {
+    if (contentProp?.type === "url") {
+      content = contentProp.url || "";
+    } else if (contentProp?.type === "title" && Array.isArray(contentProp.title)) {
+      content = contentProp.title.map((t: any) => t?.plain_text || "").join("");
+    } else if (contentProp?.type === "rich_text" && Array.isArray(contentProp.rich_text)) {
+      content = contentProp.rich_text.map((t: any) => t?.plain_text || "").join("");
+    } else {
+      // FALLBACK: Find the largest rich_text field that isn't the name
+      const textProps = Object.keys(props).filter(k => props[k].type === "rich_text" && props[k].rich_text?.length > 0);
+      if (textProps.length > 0) {
+        // Pick the one with the most content
+        const bestKey = textProps.reduce((a, b) => 
+          props[a].rich_text.map((t:any)=>t.plain_text).join("").length > props[b].rich_text.map((t:any)=>t.plain_text).join("").length ? a : b
+        );
+        content = props[bestKey].rich_text.map((t: any) => t?.plain_text || "").join("");
+      }
+    }
+  } catch (e) { /* silent */ }
+
+  // Fallback: If content is still empty, look for any URL property
+  if (!content) {
+    const urlKey = Object.keys(props).find(k => props[k].type === "url" && props[k].url);
+    if (urlKey) content = props[urlKey].url;
   }
 
-  console.log(`fetchSnippets: Completed. Found ${allSnippets.length} snippets.`);
-  return allSnippets;
+  // Fallback: If name is generic/missing and we have content (common for "Say"/Microblog DBs),
+  // use the first sentence of the content as the name.
+  if ((name === "Untitled" || name.trim() === "") && content.trim().length > 0) {
+      name = content.split('\n')[0].substring(0, 60).trim();
+  }
+
+  let type, typeColor, status, statusColor;
+  const typeProp = findProp(["type", "category", "label", "tag", "类型", "分类", "标签"]);
+  if (typeProp?.type === "select" && typeProp.select) {
+    type = typeProp.select.name;
+    typeColor = mapNotionColor(typeProp.select.color);
+  } else if (typeProp?.type === "multi_select" && typeProp.multi_select?.[0]) {
+    type = typeProp.multi_select[0].name;
+    typeColor = mapNotionColor(typeProp.multi_select[0].color);
+  }
+
+  const statusProp = findProp(["status", "state", "stage", "状态", "阶段"]);
+  if (statusProp?.status) {
+    status = statusProp.status.name;
+    statusColor = mapNotionColor(statusProp.status.color);
+  } else if (statusProp?.select) {
+    status = statusProp.select.name;
+    statusColor = mapNotionColor(statusProp.select.color);
+  }
+
+  let trigger = undefined;
+  if (triggerProp?.type === "rich_text" && Array.isArray(triggerProp.rich_text)) {
+    trigger = triggerProp.rich_text[0]?.plain_text;
+  }
+
+  let description = undefined;
+  if (descProp?.type === "rich_text" && Array.isArray(descProp.rich_text)) {
+    description = descProp.rich_text[0]?.plain_text;
+  }
+
+  const usageProp = findProp(["usage count", "usage", "count", "times used", "copy count", "使用次数", "使用", "次数"]);
+  const lastUsedProp = findProp(["last used", "last used at", "recent", "time", "date", "最后使用", "时间", "日期"]);
+
+  let usageCount = 0;
+  if (usageProp?.type === "number") usageCount = usageProp.number || 0;
+
+  let lastUsed = undefined;
+  if (lastUsedProp?.type === "date") lastUsed = lastUsedProp.date?.start;
+
+  const previewProp = findProp(["preview", "image", "thumb", "picture", "预览图", "img", "pic"]);
+  let preview = undefined;
+  try {
+    if (previewProp?.type === "files" && Array.isArray(previewProp.files) && previewProp.files[0]) {
+      const fileObj = previewProp.files[0];
+      preview = fileObj.type === "file" ? fileObj.file?.url : fileObj.external?.url;
+    }
+  } catch (e) { /* silent */ }
+
+  if (!content && description) content = description;
+
+  if ((!name || name === "Untitled") && content) {
+    const firstLine = content.split("\n")[0];
+    const firstSentence = firstLine.split(/[.!?。！？]/)[0];
+    name = firstSentence.substring(0, 30).trim() + (firstLine.length > 30 ? "..." : "");
+  }
+
+  if (!content) {
+    // If we have snippets but they are failing to extract the content property, this is the main issue.
+    // console.log(`extractSnippetFromPage: Failed to extract content. Page ID: ${page.id}, Properties present:`, Object.keys(props).join(", "));
+    return null;
+  }
+
+  return {
+    id: page.id,
+    name,
+    content,
+    trigger,
+    description,
+    databaseId: dbId,
+    preview,
+    usageCount,
+    lastUsed,
+    url: page.url,
+    type,
+    typeColor,
+    status,
+    statusColor,
+  };
 }
 
 export async function updateSnippet(
@@ -319,11 +317,6 @@ export async function updateSnippetUsage(
   const notion = new Client({ auth: preferences.notionToken });
 
   try {
-      // We need to find the correct property names again since they might vary per database
-      // Optimization: We can't cache property IDs easily without more complex logic, 
-      // so we will query the page to get the property IDs or Names.
-      // But since this is "fire-and-forget", a little overhead is acceptable.
-      
       const page = await notion.pages.retrieve({ page_id: pageId });
       const props = (page as any).properties;
 
@@ -359,7 +352,6 @@ export async function updateSnippetUsage(
 
   } catch (e) {
     console.error(`Failed to update usage for snippet ${pageId}`, e);
-    // Suppress error toast since this is a background operation
   }
 }
 
@@ -372,7 +364,6 @@ export async function createSnippet(payload: {
   const preferences = getPreferenceValues<Preferences>();
   const notion = new Client({ auth: preferences.notionToken });
 
-  // 1. Fetch DB properties to find correct keys
   const db = await notion.databases.retrieve({ database_id: payload.dbId });
   const props = db.properties;
 
@@ -383,7 +374,6 @@ export async function createSnippet(payload: {
     });
   };
 
-  // Detect properties
   const titleKey = Object.keys(props).find((key) => props[key].type === "title") || "Name";
   const contentKey = findPropName(["content", "body", "text", "snippet content", "value", "内容", "正文"], "rich_text") || 
                      Object.keys(props).find(k => props[k].type === "rich_text" && k.toLowerCase().includes("content")) ||
@@ -414,24 +404,33 @@ export async function createSnippet(payload: {
 }
 
 export async function fetchDatabases(): Promise<DatabaseMetadata[]> {
+  console.log("fetchDatabases: Starting...");
   const preferences = getPreferenceValues<Preferences>();
   const notion = new Client({ auth: preferences.notionToken });
-  const dbIds = (preferences.databaseIds || "").replace(/[\[\]"']/g, "").split(",").map((id) => id.trim()).filter(id => id.length > 0);
   
-  const dbs: DatabaseMetadata[] = [];
-  for (const id of dbIds) {
+  const dbIdsRaw = (preferences.databaseIds || "").replace(/[\[\]"']/g, "").split(",");
+  const dbIds = Array.from(new Set(dbIdsRaw.map((id) => id.trim()).filter(id => id.length > 5)));
+  
+  console.log(`fetchDatabases: Fetching metadata for ${dbIds.length} unique databases`);
+
+  const fetchTasks = dbIds.map(async (id) => {
     try {
-      const res = await notion.databases.retrieve({ database_id: id });
+      console.log(`fetchDatabases: [${id}] Retrieving metadata...`);
+      const res = await withRetry(() => notion.databases.retrieve({ database_id: id }));
       let title = id.substring(0, 8);
       if ("title" in res && Array.isArray(res.title)) {
         title = res.title[0]?.plain_text || title;
       }
       const icon = extractIcon((res as any).icon);
-      dbs.push({ id, title, icon });
+      console.log(`fetchDatabases: [${id}] Metadata retrieved: ${title}`);
+      return { id, title, icon };
     } catch (e) {
-      console.error(`Failed to fetch title for DB ${id}`, e);
-      dbs.push({ id, title: `Database (${id.substring(0, 6)}...)` });
+      console.error(`fetchDatabases: [${id}] Failed:`, e);
+      return { id, title: `Database (${id.substring(0, 6)}...)` };
     }
-  }
-  return dbs;
+  });
+
+  const results = await Promise.all(fetchTasks);
+  console.log(`fetchDatabases: All complete. Found ${results.length} entries.`);
+  return results;
 }

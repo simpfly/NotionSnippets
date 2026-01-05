@@ -1,6 +1,6 @@
 import { ActionPanel, Action, List, useNavigation, Clipboard, showToast, Toast, open, Icon, getPreferenceValues, confirmAlert, Alert, Color, closeMainWindow } from "@raycast/api"; 
 import { useCachedState } from "@raycast/utils";
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { fetchSnippets, fetchDatabases, updateSnippetUsage } from "./api/notion";
 import { Snippet, Preferences, DatabaseMetadata } from "./types/index";
 import { parsePlaceholders, processOfficialPlaceholders } from "./utils/placeholder";
@@ -12,7 +12,7 @@ import path from "path";
 import { exec } from "child_process";
 
 export default function Command() {
-  console.log("Rendering Notion Snippets Command");
+  console.log("Rendering Notion Snippets Command...");
 
   // State
   const preferences = getPreferenceValues<Preferences>();
@@ -22,8 +22,15 @@ export default function Command() {
   const [selectedDbId, setSelectedDbId] = useState<string>("all");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [searchText, setSearchText] = useState("");
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(snippets.length === 0);
   const [dbStatus, setDbStatus] = useState<string>("Initializing...");
+  const isSyncingRef = useRef(false);
+  const lastSyncTimeRef = useRef(0);
+  const hasAttemptedInitialLoad = useRef(false);
+
+  useEffect(() => {
+    console.log(`Index: useEffect[load] triggered. isSyncingRef=${isSyncingRef.current}, snippets=${snippets.length}`);
+  }, []);
 
   const dbMap = useMemo(() => {
     const map: Record<string, DatabaseMetadata> = {};
@@ -43,56 +50,153 @@ export default function Command() {
   useEffect(() => {
     let isMounted = true;
     async function load() {
-      setIsLoading(true);
+      const now = Date.now();
+      // Lock safety: if the lock is older than 30 seconds, assume it's stale (e.g. after crash/hot-reload)
+      if (isSyncingRef.current && (now - lastSyncTimeRef.current < 30000)) {
+        console.log("Index: Sync lock active and fresh, skipping auto-load");
+        return;
+      }
+
       try {
-        console.log("Index: Calling fetchDatabases()...");
+        isSyncingRef.current = true;
+        lastSyncTimeRef.current = now;
+        
+        // Parallel metadata and snippets fetch
         fetchDatabases().then(dbs => {
           if (isMounted) {
             setDatabases(dbs || []);
+            // If we find databases, we can at least show the empty list
+            if (dbs && dbs.length > 0) setIsLoading(false);
           }
         });
 
-        console.log("Index: Calling fetchSnippets()...");
-        const data = await fetchSnippets();
+        // We don't await fetchSnippets here to allow the UI to remain interactive
+        // and show batches as they arrive.
+        const allData = await fetchSnippets(
+          (count) => {
+             if (isMounted) {
+               setDbStatus(`Syncing... checked ${count} items so far.`);
+               setIsLoading(false); // Definitely stop loading once we have progress
+             }
+          },
+          (batch) => {
+            if (isMounted && batch.length > 0) {
+              setSnippets(prev => {
+                const map = new Map(prev.map(s => [s.id, s]));
+                batch.forEach(s => map.set(s.id, s));
+                return Array.from(map.values());
+              });
+            }
+          }
+        );
+        
         if (isMounted) {
-          const safeData = data || [];
-          console.log(`Index: fetchSnippets returned ${safeData.length} items`);
-          setSnippets(safeData);
-          setDbStatus(safeData.length > 0 ? `Loaded ${safeData.length} snippets` : "No snippets found.");
+          setSnippets(prev => {
+             const map = new Map(prev.map(s => [s.id, s]));
+             allData.forEach(s => map.set(s.id, s));
+             return Array.from(map.values());
+          });
+          setDbStatus(allData.length > 0 ? `Synced ${allData.length} snippets` : "No snippets found.");
         }
       } catch (error) {
         if (isMounted) {
-          console.error("Index: fetchSnippets failed", error);
-          setDbStatus(`Error: ${String(error)}`);
-          showToast({
-            style: Toast.Style.Failure,
-            title: "Failed to fetch snippets",
-            message: String(error),
-          });
+          console.error("Index: Sync failed", error);
+          setDbStatus(`Sync Error: ${String(error)}`);
         }
       } finally {
+        isSyncingRef.current = false;
         if (isMounted) setIsLoading(false);
       }
     }
     load();
-    return () => { isMounted = false; };
-  }, []);
+    return () => { 
+      isMounted = false; 
+      isSyncingRef.current = false; // Release lock on unmount (fixes Strict Mode double-invoke)
+    };
+  }, []); // Run ONLY on mount. Manual re-sync handles the rest.
 
   const refreshSnippets = async () => {
+    if (isSyncingRef.current) {
+      showToast({ style: Toast.Style.Failure, title: "Sync already in progress" });
+      return;
+    }
+
     console.log("refreshSnippets: Manually triggered");
+    const toast = await showToast({ 
+      style: Toast.Style.Animated, 
+      title: "Syncing with Notion...",
+      message: "Fetching metadata..."
+    });
+    
+    isSyncingRef.current = true;
     setIsLoading(true);
     try {
-      const [data, dbs] = await Promise.all([fetchSnippets(), fetchDatabases()]);
-      setSnippets(data || []);
+      // 1. Fetch Databases first
+      const dbs = await fetchDatabases();
       setDatabases(dbs || []);
-      setDbStatus(data.length > 0 ? `Loaded ${data.length} snippets from ${dbs.length} databases` : "No snippets found.");
-      console.log(`refreshSnippets: Successfully loaded ${data?.length} snippets`);
+
+      // 2. Fetch Snippets with progress and incremental loading
+      const data = await fetchSnippets(
+        (count) => {
+          toast.message = `Fetched ${count} snippets...`;
+        },
+        (batch) => {
+          setSnippets(prev => {
+            const map = new Map(prev.map(s => [s.id, s]));
+            batch.forEach(s => map.set(s.id, s));
+            return Array.from(map.values());
+          });
+        }
+      );
+      
+      // Final merge
+      setSnippets(prev => {
+        const map = new Map(prev.map(s => [s.id, s]));
+        data.forEach(s => map.set(s.id, s));
+        return Array.from(map.values());
+      });
+      
+      const status = data.length > 0 
+        ? `Found ${data.length} snippets in ${dbs.length} databases` 
+        : "No snippets found.";
+      
+      setDbStatus(status);
+      toast.style = Toast.Style.Success;
+      toast.title = "Sync Complete";
+      toast.message = status;
+      
     } catch (error) {
       console.error("refreshSnippets: Failed", error);
       setDbStatus(`Error: ${String(error)}`);
+      toast.style = Toast.Style.Failure;
+      toast.title = "Sync Failed";
+      toast.message = String(error);
     } finally {
+      isSyncingRef.current = false;
       setIsLoading(false);
     }
+  };
+
+  const forceReSync = async () => {
+    const confirm = await confirmAlert({
+      title: "Force Full Re-sync?",
+      message: "This will clear your local cache and perform a complete 100% fresh pull from Notion.",
+      primaryAction: { title: "Start Fresh Sync", style: Alert.ActionStyle.Destructive }
+    });
+    
+    if (!confirm) return;
+
+    // Show immediate feedback
+    const toast = await showToast({ style: Toast.Style.Animated, title: "Clearing Cache & Restarting..." });
+    
+    setSnippets([]); 
+    setDatabases([]);
+    setIsLoading(true);
+    
+    // We call refreshSnippets which will handle the rest of the Toast updates
+    setTimeout(() => {
+      refreshSnippets();
+    }, 100);
   };
 
   const increaseUsage = (snippetId: string) => {
@@ -249,10 +353,18 @@ export default function Command() {
       });
   }, [snippets, selectedDbId, searchText]);
 
+  const placeholder = useMemo(() => {
+    const total = snippets.length;
+    const filtered = filteredAndSortedSnippets.length;
+    if (isLoading && total === 0) return "Connecting to Notion...";
+    if (searchText) return `Found ${filtered} of ${total} snippets...`;
+    return `Search across ${total} snippets...`;
+  }, [snippets.length, filteredAndSortedSnippets.length, searchText, isLoading]);
+
   return (
     <List 
       isLoading={isLoading} 
-      searchBarPlaceholder={`Search ${filteredAndSortedSnippets.length} snippets by name or trigger...`}
+      searchBarPlaceholder={placeholder}
       isShowingDetail={true}
       onSearchTextChange={setSearchText}
       onSelectionChange={(ids) => {
@@ -445,6 +557,12 @@ export default function Command() {
                   icon={Icon.RotateAntiClockwise}
                   shortcut={{ modifiers: ["cmd"], key: "r" }}
                   onAction={refreshSnippets}
+                />
+                <Action
+                  title="Force Full Re-sync"
+                  icon={Icon.Warning}
+                  shortcut={{ modifiers: ["cmd", "shift"], key: "r" }}
+                  onAction={forceReSync}
                 />
                 <Action
                   title={(selectedIds?.length || 0) > 1 ? `Export ${selectedIds.length} for Global Use` : "Export All for Global Use"}
