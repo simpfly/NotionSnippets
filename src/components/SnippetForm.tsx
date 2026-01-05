@@ -1,11 +1,11 @@
 import { Form, ActionPanel, Action, showToast, Toast, useNavigation, Icon } from "@raycast/api";
 import { useState, useEffect } from "react";
 import { createSnippet, updateSnippet, fetchDatabases } from "../api/notion";
-import { Snippet } from "../types";
+import { Snippet, SnippetIndex } from "../types";
 
 interface Props {
   snippet?: Snippet; // If provided, we are in Edit mode
-  onSuccess?: () => void;
+  onSuccess?: (snippet?: SnippetIndex) => void;
 }
 
 export default function SnippetForm({ snippet, onSuccess }: Props) {
@@ -41,23 +41,44 @@ export default function SnippetForm({ snippet, onSuccess }: Props) {
 
     const toast = await showToast({ style: Toast.Style.Animated, title: toastText });
     try {
+      let resultId;
       if (isEdit && snippet) {
         await updateSnippet(snippet.id, {
           name: values.name,
           content: values.content,
           trigger: values.trigger,
         });
+        resultId = snippet.id;
       } else {
-        await createSnippet({
+        resultId = await createSnippet({
           dbId: values.dbId,
           name: values.name,
           content: values.content,
           trigger: values.trigger,
         });
       }
+
       toast.style = Toast.Style.Success;
       toast.title = successText;
-      if (onSuccess) onSuccess();
+      
+      // OPTIMISTIC UPDATE: Pass the new data back to parent
+      if (onSuccess) {
+         // Construct a local snippet index to display immediately
+        const optimisticSnippet: any = {
+          id: resultId,
+          name: values.name,
+          // Store preview/length for index display
+          contentPreview: values.content.length > 500 ? values.content.substring(0, 500) + "..." : values.content,
+          contentLength: values.content.length,
+          trigger: values.trigger,
+          databaseId: isEdit ? snippet!.databaseId : values.dbId,
+          // For updates, preserve existing metadata
+          usageCount: isEdit ? snippet!.usageCount : 0,
+          lastUsed: isEdit ? snippet!.lastUsed : new Date(),
+        };
+        onSuccess(optimisticSnippet);
+      }
+      
       pop();
     } catch (e: any) {
       toast.style = Toast.Style.Failure;

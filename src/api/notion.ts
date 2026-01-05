@@ -97,10 +97,11 @@ export async function fetchSnippets(
   const preferences = getPreferenceValues<Preferences>();
   const notion = new Client({ auth: preferences.notionToken });
 
-  const dbIdsRaw = (preferences.databaseIds || "").replace(/[\[\]"']/g, "").split(",");
+  const dbIdsRaw = (preferences.databaseIds || "").replace(/[\[\]"']/g, "").split(/[,\s]+/);
   const dbIds = Array.from(new Set(dbIdsRaw.map((id) => id.trim()).filter(id => id.length > 5)));
   
-  console.log(`fetchSnippets: Starting parallel fetch for ${dbIds.length} databases (NO LIMITS)`);
+  const STOP_LIMIT = 1000; // Hard limit to prevent OOM
+  console.log(`fetchSnippets: Starting fetch for ${dbIds.length} databases (Limit: ${STOP_LIMIT} items)`);
 
   let totalFound = 0;
   let totalExtracted = 0;
@@ -110,6 +111,11 @@ export async function fetchSnippets(
   const allSnippets: SnippetIndex[] = [];
   
   for (const dbId of dbIds) {
+    if (totalExtracted >= STOP_LIMIT) {
+       console.warn(`fetchSnippets: Reached GLOBAL LIMIT of ${STOP_LIMIT}. Skipping remaining databases.`);
+       break;
+    }
+
     const dbSnippets = await (async () => {
     try {
       console.log(`fetchSnippets: [${dbId}] Starting fetch...`);
@@ -130,17 +136,21 @@ export async function fetchSnippets(
           const response = await withRetry(() => notion.databases.query({
             database_id: dbId,
             start_cursor: startCursor,
+            sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
           }));
 
           console.log(`fetchSnippets: [${dbId}] Received page ${pageCount} (${response.results.length} results)`);
           
           let pageExtracted = 0;
+          let pageSkipped = 0;
           for (const page of response.results) {
             if ("properties" in page) {
               const snippet = extractSnippetIndexFromPage(page, dbId);
               if (snippet) {
                 snippets.push(snippet);
                 pageExtracted++;
+              } else {
+                pageSkipped++;
               }
             }
           }
@@ -148,7 +158,17 @@ export async function fetchSnippets(
           totalFound += response.results.length;
           totalExtracted += pageExtracted;
           
-          console.log(`fetchSnippets: [${dbId}] Extracted ${pageExtracted}/${response.results.length} from this page`);
+          console.log(`fetchSnippets: [${dbId}] Page ${pageCount}: ${pageExtracted} extracted, ${pageSkipped} skipped. Total extracted: ${totalExtracted}`);
+
+          if (totalExtracted >= STOP_LIMIT) {
+             console.warn(`fetchSnippets: Reached LIMIT of ${STOP_LIMIT}. Stopping fetch for ${dbId}.`);
+             if (onBatch && pageExtracted > 0) {
+               onBatch(snippets.slice(-pageExtracted));
+             }
+             if (onProgress) onProgress(totalExtracted);
+             hasMore = false; // Stop this DB
+             break; 
+          }
 
           // Batch updates: use very small batches and immediate processing
           if (onBatch && pageExtracted > 0) {
@@ -168,13 +188,6 @@ export async function fetchSnippets(
           
           if (onProgress) onProgress(totalExtracted);
           
-          // Aggressive cleanup: clear old items from memory every 10 pages
-          if (pageCount % 10 === 0 && snippets.length > 100) {
-            console.log(`fetchSnippets: [${dbId}] Memory cleanup: keeping last 100 items, clearing older ones`);
-            // Keep only the most recent 100 items in memory during fetch
-            // The rest are already sent via onBatch
-            snippets.splice(0, snippets.length - 100);
-          }
           
           // Small delay every 50 pages to allow GC
           if (pageCount % 50 === 0) {
@@ -227,7 +240,7 @@ export async function fetchSnippets(
       return snippets;
     } catch (error: any) {
       console.error(`fetchSnippets: [${dbId}] Error:`, error);
-      return [];
+      throw error; // Re-throw to let the UI know clearly that sync failed
     }
     })();
     
@@ -366,9 +379,14 @@ function extractSnippetIndexFromPage(page: any, dbId: string): SnippetIndex | nu
   }
 
   if (!content) {
-    // If we have snippets but they are failing to extract the content property, this is the main issue.
-    // console.log(`extractSnippetIndexFromPage: Failed to extract content. Page ID: ${page.id}, Properties present:`, Object.keys(props).join(", "));
-    return null;
+    // Fallback: If no explicit content/description/url is found, 
+    // but the item has a valid name (typical for Media databases), use the Name as content.
+    if (name && name !== "Untitled") {
+      content = name;
+    } else {
+      // Only skip if we truly have nothing to show
+      return null;
+    }
   }
 
   // Store only preview (first 500 chars) and length - full content loaded on demand
@@ -550,7 +568,7 @@ export async function fetchDatabases(): Promise<DatabaseMetadata[]> {
   const preferences = getPreferenceValues<Preferences>();
   const notion = new Client({ auth: preferences.notionToken });
   
-  const dbIdsRaw = (preferences.databaseIds || "").replace(/[\[\]"']/g, "").split(",");
+  const dbIdsRaw = (preferences.databaseIds || "").replace(/[\[\]"']/g, "").split(/[,\s]+/);
   const dbIds = Array.from(new Set(dbIdsRaw.map((id) => id.trim()).filter(id => id.length > 5)));
   
   console.log(`fetchDatabases: Fetching metadata for ${dbIds.length} unique databases`);

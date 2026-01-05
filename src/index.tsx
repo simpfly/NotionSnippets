@@ -224,14 +224,16 @@ export default function Command() {
             const pending = pendingBatchRef.current.splice(0);
             allData.push(...pending);
           }
-          
-          // NO LIMITS - store all indexes
+          // Deduplicate first to ensure status matches state
+          const uniqueData = Array.from(new Map(allData.map(s => [s.id, s])).values());
+
+          // Merge to allow incremental loading (user request)
           setSnippetIndexes(prev => {
              const map = new Map(prev.map(s => [s.id, s]));
-             allData.forEach(s => map.set(s.id, s));
+             uniqueData.forEach(s => map.set(s.id, s));
              return Array.from(map.values());
           });
-          setDbStatus(allData.length > 0 ? `Synced ${allData.length} snippets` : "No snippets found.");
+          setDbStatus(uniqueData.length > 0 ? `Synced ${uniqueData.length} snippets` : "No snippets found.");
         }
       } catch (error) {
         if (isMounted) {
@@ -396,14 +398,18 @@ export default function Command() {
       
       // NO LIMITS - store all indexes
       // Final merge
+      // Deduplicate result to ensure status matches UI
+      const uniqueData = Array.from(new Map(data.map(s => [s.id, s])).values());
+
+      // Final merge (support incremental updates)
       setSnippetIndexes(prev => {
         const map = new Map(prev.map(s => [s.id, s]));
-        data.forEach(s => map.set(s.id, s));
+        uniqueData.forEach(s => map.set(s.id, s));
         return Array.from(map.values());
       });
       
-      const status = data.length > 0 
-        ? `Found ${data.length} snippets in ${dbs.length} databases` 
+      const status = uniqueData.length > 0 
+        ? `Found ${uniqueData.length} snippets in ${dbs.length} databases` 
         : "No snippets found.";
       
       setDbStatus(status);
@@ -611,9 +617,16 @@ export default function Command() {
         const lowerSearch = searchText.toLowerCase();
         const lowerName = (snippet.name || "").toLowerCase();
         const lowerTrigger = (snippet.trigger || "").toLowerCase();
+        const lowerDesc = (snippet.description || "").toLowerCase();
+        const lowerContent = (snippet.contentPreview || "").toLowerCase();
         
-        // Match name or trigger
-        if (lowerName.includes(lowerSearch) || lowerTrigger.includes(lowerSearch)) return true;
+        // Match name, trigger, description, or content
+        if (
+          lowerName.includes(lowerSearch) || 
+          lowerTrigger.includes(lowerSearch) ||
+          lowerDesc.includes(lowerSearch) ||
+          lowerContent.includes(lowerSearch)
+        ) return true;
 
         // Trigger + argument match
         if (snippet.trigger && lowerSearch.startsWith(lowerTrigger + " ")) return true;
@@ -644,13 +657,20 @@ export default function Command() {
       });
   }, [snippetIndexes, selectedDbId, searchText]);
 
+  const dbCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    snippetIndexes.forEach(s => {
+      if (s.databaseId) {
+        counts[s.databaseId] = (counts[s.databaseId] || 0) + 1;
+      }
+    });
+    return counts;
+  }, [snippetIndexes]);
+
   const placeholder = useMemo(() => {
-    const total = snippetIndexes.length;
-    const filtered = filteredAndSortedSnippets.length;
-    if (isLoading && total === 0) return "Connecting to Notion...";
-    if (searchText) return `Found ${filtered} of ${total} snippets...`;
-    return `Search across ${total} snippets...`;
-  }, [snippetIndexes.length, filteredAndSortedSnippets.length, searchText, isLoading]);
+    if (isLoading && snippetIndexes.length === 0) return "Connecting to Notion...";
+    return "Search snippets...";
+  }, [isLoading, snippetIndexes.length]);
 
   return (
     <List 
@@ -674,9 +694,14 @@ export default function Command() {
           onChange={(newValue) => setSelectedDbId(newValue)}
         >
           <List.Dropdown.Section title="Databases">
-            <List.Dropdown.Item title="All Snippets" value="all" />
+            <List.Dropdown.Item title={`All Snippets (${snippetIndexes.length})`} value="all" />
             {databases.map((db) => (
-              <List.Dropdown.Item key={db.id} title={db.title} value={db.id} icon={db.icon} />
+              <List.Dropdown.Item 
+                key={`${db.id}-${dbCounts[db.id] || 0}`} 
+                title={`${db.title} (${dbCounts[db.id] || 0})`} 
+                value={db.id} 
+                icon={db.icon} 
+              />
             ))}
           </List.Dropdown.Section>
         </List.Dropdown>
@@ -752,7 +777,11 @@ export default function Command() {
               id={index.id}
               icon={dbMap[index.databaseId || ""]?.icon || (index.typeColor ? { source: Icon.Dot, tintColor: index.typeColor as Color } : Icon.Dot)}
               title={index.name}
-              keywords={index.trigger ? [index.trigger] : []}
+              keywords={[
+                ...(index.trigger ? [index.trigger] : []),
+                ...(index.description ? index.description.split(" ").slice(0, 5) : []), // Add first few words of description
+                ...(index.contentPreview ? [index.contentPreview.substring(0, 50)] : []) // Add start of content for search
+              ]}
               accessories={[
                 ...(index.type ? [{ tag: { value: index.type, color: index.typeColor as Color } }] : []),
                 ...(index.trigger ? [{ tag: { value: index.trigger, color: Color.Blue } }] : [])
@@ -829,9 +858,15 @@ export default function Command() {
                   onAction={() => setShowMetadata(!showMetadata)}
                 />
                 <Action
+                  title="Refresh Snippets"
+                  icon={Icon.ArrowClockwise}
+                  shortcut={{ modifiers: ["cmd"], key: "r" }}
+                  onAction={refreshSnippets}
+                />
+                <Action
                   title="Open in Notion"
                   icon={Icon.Link}
-                  shortcut={{ modifiers: ["ctrl"], key: "n" }}
+                  shortcut={{ modifiers: ["cmd"], key: "n" }}
                   onAction={() => {
                     if (index.url) {
                       open(index.url);
@@ -854,7 +889,21 @@ export default function Command() {
                   title="Create New Snippet"
                   icon={Icon.Plus}
                   shortcut={{ modifiers: ["cmd", "shift"], key: "n" }}
-                  onAction={() => push(<SnippetForm onSuccess={refreshSnippets} />)}
+                  onAction={() => push(<SnippetForm onSuccess={(newSnippet) => {
+                    if (newSnippet) {
+                      // Optimistic Update: Add to local state immediately
+                      setSnippetIndexes(prev => {
+                        const exists = prev.find(p => p.id === newSnippet.id);
+                        if (exists) {
+                          return prev.map(p => p.id === newSnippet.id ? newSnippet : p);
+                        }
+                        return [newSnippet, ...prev];
+                      });
+                      showToast({ style: Toast.Style.Success, title: "Snippet added locally" });
+                    }
+                    // Background refresh to confirm validity
+                    refreshSnippets();
+                  }} />)}
                 />
               </ActionPanel.Section>
               <ActionPanel.Section title="Sync & Export">

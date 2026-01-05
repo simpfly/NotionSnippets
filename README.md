@@ -1,62 +1,61 @@
 # Notion Snippets for Raycast
 
-Sync your personal code snippets, canned responses, and notes from Notion directly into Raycast.
+<img src="assets/icon.png" width="128" height="128" />
 
-## Features
+Turn your Notion databases into a high-performance snippet manager for Raycast. Sync code snippets, canned responses, microblogs, and bookmarks instanty.
 
-- **Seamless Sync**: Fetches snippets from your specified Notion Database(s).
-- **Smart Search**: Instantly fuzzy search through snippet names, content, and triggers.
-- **Quick Actions**:
-  - `Enter`: Paste snippet to the active application.
-  - `Cmd + C`: Copy snippet content to clipboard.
-  - `Cmd + E`: Export specialized prompts (for AI Context).
-- **Dynamic Placeholders**: Supports standard placeholders (similar to Raycast Snippets) if you use them in your Notion content.
+## ✨ Features
 
-## Setup Guide
+- **🚀 High Performance**:
+  - **Lightweight Indexing**: Loads metadata first, so you see your list instantly.
+  - **On-Demand Loading**: Fetches full content only when you need it.
+  - **Memory Safe**: Automatically manages memory usage (safe limit of 1000 recent items).
+- **🧠 Smart Support**:
+  - **Snippets**: Standard name/content/trigger support.
+  - **Microblogs ("Say")**: Automatically handles "Untitled" posts by showing content as the title.
+  - **Bookmarks ("Media")**: intelligently grabs URLs for bookmark items.
+- **⚡️ Quick Actions**:
+  - `Enter`: Paste to active app (fills placeholders if present).
+  - `Cmd + C`: Copy content.
+  - `Cmd + E`: Export selected snippets (great for AI contexts).
+- **🧩 Dynamic Placeholders**: Supports standard placeholders (e.g., `{{clipboard}}`) and custom fillable forms.
 
-### 1. Prerequisities
+## 🛠 Setup Guide
 
-You need a Notion Integration Token.
+### 1. Create Integration
 
-1. Go to [My Integrations](https://www.notion.so/my-integrations).
+1. Go to [Notion My Integrations](https://www.notion.so/my-integrations).
 2. Create a new integration (e.g., "Raycast Snippets").
 3. **Copy the "Internal Integration Secret"**.
 
-### 2. Prepare Your Notion Database
+### 2. Connect Databases
 
-Create a Database in Notion with the following properties (case-insensitive):
+You can use any database. The extension effectively guesses the right fields:
 
-| Property Name | Type | Description |
-|p ------------- | ----------- | ------------------------------------ |
-| **Name** | Title | The name of the snippet. |
-| **Content** | Text / URL | The actual text content to paste. |
-| **Trigger** | Text | (Optional) A keyword or shortcut. |
-| **Description**| Text | (Optional) Extra context or tags. |
+**Supported Fields (Case-Insensitive):**
+
+- **Name**: `Name`, `Title`, `Subject`, `In`
+- **Content**: `Content`, `Body`, `Code`, `URL`, `Link`
+- **Trigger**: `Trigger`, `Keyword`, `Shortcut`
+- **Description**: `Description`, `Notes`, `Tags`
 
 **Important**:
+Click the `...` menu on your Notion Database page -> `Connections` -> **Add your integration**.
 
-- You must **share** this database with your integration. Click the `...` menu on the database page -> `Connections` -> Add your integration.
-- Copy the **Database ID** from the URL.
-  - URL format: `https://www.notion.so/myworkspace/DATABASE_ID?v=...`
-  - It is the 32-character part before the `?`.
+### 3. Configure Raycast
 
-### 3. Configure Extension
+1. Install this extension.
+2. In Raycast Settings -> Extensions -> Notion Snippets:
+   - **Notion Token**: Paste your secret starting with `secret_...`
+   - **Database IDs**: Paste your Database ID(s). Can be multiple, separated by commas.
 
-1. Install this extension in Raycast.
-2. Open Raycast Settings (`Cmd + ,`) -> Extensions -> Notion Snippets.
-3. Paste your **Notion Token**.
-4. Paste your **Database ID** (you can provide multiple IDs separated by commas).
+_(The Database ID is the 32-char code in your Notion URL, e.g. `notion.so/myworkspace/THIS_PART_IS_THE_ID?v=...`)_
 
-## Usage
+## 💡 Usage Tips
 
-- **List View**: Shows all synced snippets.
-- **Search**: Type to filter.
-- **Multi-Select**: Use `Shift + Down` to select multiple snippets, then press `Enter` to export/copy them as a combined list (great for compiling prompts).
-
-## Troubleshooting
-
-- **"Database Empty or Hidden"**: ensure you have actually connected the specific database to your Integration user in Notion.
-- **Crash / Error**: Check the logs or ensure your token is correct.
+- **Search Scope**: The search bar shows the total count. Select a specific database from the dropdown to filter the count.
+- **Safety Limit**: To ensure Raycast stays fast, the extension fetches the **1000 most recently updated** items.
+- **Microblogs**: Perfect for quick thoughts. If you leave the "Name" blank in Notion, the extension will display the start of your content as the title.
 
 ## License
 
