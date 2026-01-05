@@ -1,6 +1,22 @@
 import { Client } from "@notionhq/client";
 import { Preferences, Snippet } from "../types/index";
-import { getPreferenceValues, showToast, Toast } from "@raycast/api";
+import { getPreferenceValues, showToast, Toast, Color } from "@raycast/api";
+
+function mapNotionColor(notionColor: string): string | undefined {
+  const map: Record<string, string> = {
+    default: Color.SecondaryText,
+    gray: Color.SecondaryText,
+    brown: Color.SecondaryText, // Brown not in common Raycast Color?
+    orange: Color.Orange,
+    yellow: Color.Yellow,
+    green: Color.Green,
+    blue: Color.Blue,
+    purple: Color.Purple,
+    pink: Color.Magenta,
+    red: Color.Red,
+  };
+  return map[notionColor.toLowerCase()];
+}
 
 export async function fetchSnippets(): Promise<Snippet[]> {
   console.log("fetchSnippets: Function called");
@@ -35,36 +51,28 @@ export async function fetchSnippets(): Promise<Snippet[]> {
     if (!dbId || dbId.length < 5) continue;
 
     try {
+      // Fetch database details once per database
+      let dbName = dbId;
+      try {
+        const dbInfo = await notion.databases.retrieve({ database_id: dbId });
+        if ("title" in dbInfo && Array.isArray(dbInfo.title) && dbInfo.title.length > 0) {
+          dbName = dbInfo.title[0].plain_text;
+        } else if ("title" in dbInfo && Array.isArray(dbInfo.title)) {
+          dbName = "Untitled Database";
+        }
+      } catch (e) {
+        console.warn(`Could not fetch title for DB ${dbId}`, e);
+      }
+
       let hasMore = true;
       let startCursor: string | undefined = undefined;
 
       while (hasMore) {
-        console.log(`fetchSnippets: Querying database ${dbId} with cursor ${startCursor}...`);
+        console.log(`fetchSnippets: Querying database ${dbId} ("${dbName}") with cursor ${startCursor}...`);
         const response = await notion.databases.query({
           database_id: dbId,
           start_cursor: startCursor,
         });
-
-        if (!response || !response.results) {
-           console.warn(`fetchSnippets: Invalid response from DB ${dbId}`);
-           break;
-        }
-        
-        hasMore = response.has_more;
-        startCursor = response.next_cursor || undefined;
-
-        // Fetch database details to get the title
-        let dbName = dbId;
-        try {
-          const dbInfo = await notion.databases.retrieve({ database_id: dbId });
-          if ("title" in dbInfo && Array.isArray(dbInfo.title) && dbInfo.title.length > 0) {
-            dbName = dbInfo.title[0].plain_text;
-          } else if ("title" in dbInfo && Array.isArray(dbInfo.title)) {
-             dbName = "Untitled Database";
-          }
-        } catch (e) {
-          console.warn(`Could not fetch title for DB ${dbId}`, e);
-        }
 
         console.log(`fetchSnippets: Database ${dbId} ("${dbName}") responded. Results: ${response.results.length}`);
 
@@ -119,6 +127,27 @@ export async function fetchSnippets(): Promise<Snippet[]> {
                }
             } catch (e) {
                console.log("Error extracting content property", e);
+            }
+
+            // Extract Type and Status
+            let type, typeColor, status, statusColor;
+            
+            const typeProp = findProp(["type", "category", "label", "tag", "类型", "分类", "标签"]);
+            if (typeProp?.type === "select" && typeProp.select) {
+              type = typeProp.select.name;
+              typeColor = mapNotionColor(typeProp.select.color);
+            } else if (typeProp?.type === "multi_select" && typeProp.multi_select?.[0]) {
+               type = typeProp.multi_select[0].name;
+               typeColor = mapNotionColor(typeProp.multi_select[0].color);
+            }
+
+            const statusProp = findProp(["status", "state", "stage", "状态", "阶段"]);
+            if (statusProp?.type === "status" && statusProp.status) {
+              status = statusProp.status.name;
+              statusColor = mapNotionColor(statusProp.status.color);
+            } else if (statusProp?.type === "select" && statusProp.select) {
+              status = statusProp.select.name;
+              statusColor = mapNotionColor(statusProp.select.color);
             }
 
             // Extract Trigger
@@ -200,6 +229,11 @@ export async function fetchSnippets(): Promise<Snippet[]> {
                 preview, 
                 usageCount,
                 lastUsed,
+                url: (page as any).url,
+                type,
+                typeColor,
+                status,
+                statusColor,
               });
             }
           }

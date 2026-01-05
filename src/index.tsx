@@ -1,6 +1,6 @@
-import { ActionPanel, Action, List, useNavigation, Clipboard, showToast, Toast, open, Icon, getPreferenceValues, confirmAlert, Alert, Color } from "@raycast/api"; 
+import { ActionPanel, Action, List, useNavigation, Clipboard, showToast, Toast, open, Icon, getPreferenceValues, confirmAlert, Alert, Color, closeMainWindow } from "@raycast/api"; 
 import { useCachedState } from "@raycast/utils";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { fetchSnippets, fetchDatabases, updateSnippetUsage } from "./api/notion";
 import { Snippet, Preferences } from "./types/index";
 import { parsePlaceholders, processOfficialPlaceholders } from "./utils/placeholder";
@@ -18,7 +18,7 @@ export default function Command() {
   const preferences = getPreferenceValues<Preferences>();
   const [showMetadata, setShowMetadata] = useCachedState<boolean>("show-metadata", preferences.showMetadata);
   const [snippets, setSnippets] = useCachedState<Snippet[]>("notion-snippets", []);
-  const [databases, setDatabases] = useState<{ id: string; title: string }[]>([]);
+  const [databases, setDatabases] = useCachedState<{ id: string; title: string }[]>("notion-databases", []);
   const [selectedDbId, setSelectedDbId] = useState<string>("all");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [searchText, setSearchText] = useState("");
@@ -39,13 +39,19 @@ export default function Command() {
     async function load() {
       setIsLoading(true);
       try {
+        console.log("Index: Calling fetchDatabases()...");
+        fetchDatabases().then(dbs => {
+          if (isMounted) {
+            setDatabases(dbs || []);
+          }
+        });
+
         console.log("Index: Calling fetchSnippets()...");
-        const [data, dbs] = await Promise.all([fetchSnippets(), fetchDatabases()]);
+        const data = await fetchSnippets();
         if (isMounted) {
           const safeData = data || [];
           console.log(`Index: fetchSnippets returned ${safeData.length} items`);
           setSnippets(safeData);
-          setDatabases(dbs);
           setDbStatus(safeData.length > 0 ? `Loaded ${safeData.length} snippets` : "No snippets found.");
         }
       } catch (error) {
@@ -70,9 +76,10 @@ export default function Command() {
     console.log("refreshSnippets: Manually triggered");
     setIsLoading(true);
     try {
-      const data = await fetchSnippets();
+      const [data, dbs] = await Promise.all([fetchSnippets(), fetchDatabases()]);
       setSnippets(data || []);
-      setDbStatus(data.length > 0 ? `Loaded ${data.length} snippets` : "No snippets found.");
+      setDatabases(dbs || []);
+      setDbStatus(data.length > 0 ? `Loaded ${data.length} snippets from ${dbs.length} databases` : "No snippets found.");
       console.log(`refreshSnippets: Successfully loaded ${data?.length} snippets`);
     } catch (error) {
       console.error("refreshSnippets: Failed", error);
@@ -123,9 +130,6 @@ export default function Command() {
     }
 
     const expandedContent = processOfficialPlaceholders(snippet.content, clipboardText, argument);
-    if (expandedContent !== snippet.content) {
-      console.log("handleSelect: Expanded {clipboard} or {date} placeholders");
-    }
     
     const placeholders = parsePlaceholders(expandedContent) || [];
     if (placeholders.length > 0) {
@@ -133,12 +137,16 @@ export default function Command() {
       push(<FillerForm 
         snippet={{ ...snippet, content: expandedContent }} 
         placeholders={placeholders} 
-        onPaste={() => increaseUsage(snippet.id)}
+        onPaste={() => {
+            increaseUsage(snippet.id);
+            closeMainWindow();
+        }}
       />);
     } else {
       console.log("handleSelect: No placeholders left, pasting content...");
       increaseUsage(snippet.id);
       await Clipboard.paste(expandedContent);
+      await closeMainWindow();
     }
   };
 
@@ -193,10 +201,52 @@ export default function Command() {
     }
   };
 
+  const filteredAndSortedSnippets = useMemo(() => {
+    return (snippets || [])
+      .filter((snippet) => {
+        if (selectedDbId !== "all" && snippet.databaseId !== selectedDbId) return false;
+
+        if (!searchText) return true;
+        const lowerSearch = searchText.toLowerCase();
+        const lowerName = (snippet.name || "").toLowerCase();
+        const lowerTrigger = (snippet.trigger || "").toLowerCase();
+        
+        // Match name or trigger
+        if (lowerName.includes(lowerSearch) || lowerTrigger.includes(lowerSearch)) return true;
+
+        // Trigger + argument match
+        if (snippet.trigger && lowerSearch.startsWith(lowerTrigger + " ")) return true;
+        
+        return false;
+      })
+      .sort((a, b) => {
+        // Exact trigger match
+        if (searchText && a.trigger === searchText) return -1;
+        if (searchText && b.trigger === searchText) return 1;
+        
+        // Case-insensitive trigger match
+        if (searchText && a.trigger?.toLowerCase() === searchText.toLowerCase()) return -1;
+        if (searchText && b.trigger?.toLowerCase() === searchText.toLowerCase()) return 1;
+
+        // Usage Count (High to Low)
+        const usageA = a.usageCount || 0;
+        const usageB = b.usageCount || 0;
+        if (usageA !== usageB) return usageB - usageA;
+
+        // Last Used (Recent first)
+        const dateA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
+        const dateB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
+        if (dateA !== dateB) return dateB - dateA;
+
+        // Name alphabetical
+        return a.name.localeCompare(b.name);
+      });
+  }, [snippets, selectedDbId, searchText]);
+
   return (
     <List 
       isLoading={isLoading} 
-      searchBarPlaceholder={`Search ${snippets?.length || 0} snippets by name or trigger...`}
+      searchBarPlaceholder={`Search ${filteredAndSortedSnippets.length} snippets by name or trigger...`}
       isShowingDetail={true}
       onSearchTextChange={setSearchText}
       onSelectionChange={(ids) => {
@@ -263,48 +313,7 @@ export default function Command() {
           </ActionPanel>
         }
       />
-      {(snippets || [])
-        .filter((snippet) => {
-          if (selectedDbId !== "all" && snippet.databaseId !== selectedDbId) return false;
-
-          if (!searchText) return true;
-          const lowerSearch = searchText.toLowerCase();
-          const lowerName = (snippet.name || "").toLowerCase();
-          const lowerTrigger = (snippet.trigger || "").toLowerCase();
-          
-          // 1. Keep if search text matches name or trigger (partial match)
-          if (lowerName.includes(lowerSearch) || lowerTrigger.includes(lowerSearch)) return true;
-
-          // 2. Keep if it looks like we are typing a "trigger + argument" command
-          //    e.g. Trigger is "hello", Search is "hello world"
-          if (snippet.trigger && lowerSearch.startsWith(lowerTrigger + " ")) return true;
-          
-          return false;
-        })
-        .sort((a, b) => {
-          // Exact match
-          if (searchText && a.trigger === searchText) return -1;
-          if (searchText && b.trigger === searchText) return 1;
-          
-          // Trigger + Argument match (starts with trigger + space)
-          const aArg = searchText && a.trigger && searchText.startsWith(a.trigger + " ");
-          const bArg = searchText && b.trigger && searchText.startsWith(b.trigger + " ");
-          if (aArg && !bArg) return -1;
-          if (!aArg && bArg) return 1;
-
-          // 3. Usage Count (High to Low)
-          const usageA = a.usageCount || 0;
-          const usageB = b.usageCount || 0;
-          if (usageA !== usageB) return usageB - usageA;
-
-          // 4. Last Used (New to Old)
-          const dateA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
-          const dateB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
-          if (dateA !== dateB) return dateB - dateA;
-
-          return 0;
-        })
-        .map((snippet) => {
+      {filteredAndSortedSnippets.map((snippet) => {
           const placeholders = parsePlaceholders(snippet.content);
           // Highlight placeholders: {{key}} -> `{{key}}` (using code style for visibility)
           // We use a regex that matches either {key} or {{key}} and wraps it in backticks and bold
@@ -324,7 +333,10 @@ export default function Command() {
               icon={Icon.Text}
               title={snippet.name}
               keywords={snippet.trigger ? [snippet.trigger] : []}
-              accessories={snippet.trigger ? [{ tag: { value: snippet.trigger, color: Color.Blue } }] : []}
+              accessories={[
+                ...(snippet.type ? [{ tag: { value: snippet.type, color: snippet.typeColor as Color } }] : []),
+                ...(snippet.trigger ? [{ tag: { value: snippet.trigger, color: Color.Blue } }] : [])
+              ]}
               detail={
                 <List.Item.Detail 
                   markdown={highlightedContent}
@@ -333,6 +345,16 @@ export default function Command() {
                     <List.Item.Detail.Metadata>
                       <List.Item.Detail.Metadata.Label title="Information" />
                       <List.Item.Detail.Metadata.Label title="Name" text={snippet.name} />
+                      {snippet.type && (
+                        <List.Item.Detail.Metadata.TagList title="Type">
+                          <List.Item.Detail.Metadata.TagList.Item text={snippet.type} color={snippet.typeColor as Color} />
+                        </List.Item.Detail.Metadata.TagList>
+                      )}
+                      {snippet.status && (
+                        <List.Item.Detail.Metadata.TagList title="Status">
+                          <List.Item.Detail.Metadata.TagList.Item text={snippet.status} color={snippet.statusColor as Color} />
+                        </List.Item.Detail.Metadata.TagList>
+                      )}
                       {snippet.trigger && (
                         <List.Item.Detail.Metadata.Label title="Trigger" text={snippet.trigger} />
                       )}
@@ -382,21 +404,17 @@ export default function Command() {
                   shortcut={{ modifiers: ["cmd", "shift"], key: "d" }}
                   onAction={() => setShowMetadata(!showMetadata)}
                 />
-                <Action.CreateSnippet
-                  title="Sync to Official (Native)"
-                  icon={Icon.PlusCircle}
-                  shortcut={{ modifiers: ["cmd"], key: "n" }}
-                  snippet={{
-                    name: snippet.name,
-                    text: snippet.content,
-                    keyword: snippet.trigger,
-                  }}
-                />
                 <Action
-                  title="Create New Snippet"
-                  icon={Icon.Plus}
-                  shortcut={{ modifiers: ["cmd"], key: "n" }}
-                  onAction={() => push(<SnippetForm onSuccess={refreshSnippets} />)}
+                  title="Open in Notion"
+                  icon={Icon.Link}
+                  shortcut={{ modifiers: ["ctrl"], key: "n" }}
+                  onAction={() => {
+                    if (snippet.url) {
+                      open(snippet.url);
+                    } else {
+                      showToast({ style: Toast.Style.Failure, title: "No URL", message: "This snippet doesn't have a Notion URL" });
+                    }
+                  }}
                 />
                 <Action
                   title="Edit Snippet"
@@ -404,9 +422,20 @@ export default function Command() {
                   shortcut={{ modifiers: ["cmd"], key: "e" }}
                   onAction={() => push(<SnippetForm snippet={snippet} onSuccess={refreshSnippets} />)}
                 />
+                <Action
+                  title="Create New Snippet"
+                  icon={Icon.Plus}
+                  shortcut={{ modifiers: ["cmd", "shift"], key: "n" }}
+                  onAction={() => push(<SnippetForm onSuccess={refreshSnippets} />)}
+                />
               </ActionPanel.Section>
-              
-              <ActionPanel.Section title="Bulk Actions">
+              <ActionPanel.Section title="Sync & Export">
+                <Action
+                  title="Refresh Sync"
+                  icon={Icon.RotateAntiClockwise}
+                  shortcut={{ modifiers: ["cmd"], key: "r" }}
+                  onAction={refreshSnippets}
+                />
                 <Action
                   title={(selectedIds?.length || 0) > 1 ? `Export ${selectedIds.length} for Global Use` : "Export All for Global Use"}
                   icon={Icon.Download}

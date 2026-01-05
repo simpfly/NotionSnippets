@@ -9,6 +9,11 @@ export interface Snippet {
   preview?: string;
   usageCount?: number;
   lastUsed?: string;
+  url?: string;
+  type?: string;
+  typeColor?: string;
+  status?: string;
+  statusColor?: string;
 }
 
 export interface Preferences {
