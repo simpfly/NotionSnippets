@@ -1,5 +1,5 @@
 import { Client } from "@notionhq/client";
-import { Preferences, Snippet, DatabaseMetadata } from "../types/index";
+import { Preferences, Snippet, SnippetIndex, DatabaseMetadata } from "../types/index";
 import { getPreferenceValues, showToast, Toast, Color } from "@raycast/api";
 
 function mapNotionColor(notionColor: string): string | undefined {
@@ -39,7 +39,60 @@ function extractIcon(iconObj: any): string | undefined {
   return undefined;
 }
 
-export async function fetchSnippets(onProgress?: (count: number) => void, onBatch?: (snippets: Snippet[]) => void): Promise<Snippet[]> {
+// Fetch full snippet content on demand
+export async function fetchSnippetContent(pageId: string): Promise<string> {
+  const preferences = getPreferenceValues<Preferences>();
+  const notion = new Client({ auth: preferences.notionToken });
+  
+  try {
+    const page = await notion.pages.retrieve({ page_id: pageId });
+    const props = (page as any).properties;
+    
+    const findProp = (names: string[]) => {
+      for (const name of names) {
+        const match = Object.keys(props).find((key) => key.toLowerCase() === name);
+        if (match) return props[match];
+      }
+      return undefined;
+    };
+    
+    const contentProp = findProp([
+      "content", "body", "text", "snippet content", "value", "内容", "正文", "snippet text",
+      "url", "website", "href", "link", "summary", "ai summary", "dic", "description", "desc"
+    ]);
+    
+    let content = "";
+    if (contentProp?.type === "url") {
+      content = contentProp.url || "";
+    } else if (contentProp?.type === "title" && Array.isArray(contentProp.title)) {
+      content = contentProp.title.map((t: any) => t?.plain_text || "").join("");
+    } else if (contentProp?.type === "rich_text" && Array.isArray(contentProp.rich_text)) {
+      content = contentProp.rich_text.map((t: any) => t?.plain_text || "").join("");
+    } else {
+      const textProps = Object.keys(props).filter(k => props[k].type === "rich_text" && props[k].rich_text?.length > 0);
+      if (textProps.length > 0) {
+        const bestKey = textProps.reduce((a, b) => 
+          props[a].rich_text.map((t:any)=>t.plain_text).join("").length > props[b].rich_text.map((t:any)=>t.plain_text).join("").length ? a : b
+        );
+        content = props[bestKey].rich_text.map((t: any) => t?.plain_text || "").join("");
+      }
+    }
+    
+    const urlKey = Object.keys(props).find(k => props[k].type === "url" && props[k].url);
+    if (!content && urlKey) content = props[urlKey].url;
+    
+    return content || "";
+  } catch (error) {
+    console.error(`Failed to fetch content for snippet ${pageId}:`, error);
+    return "";
+  }
+}
+
+export async function fetchSnippets(
+  onProgress?: (count: number) => void, 
+  onBatch?: (snippets: SnippetIndex[]) => void,
+  onError?: (error: Error, dbId: string, pageCount: number, cursor?: string) => Promise<boolean> // Return true to retry
+): Promise<SnippetIndex[]> {
   console.log("fetchSnippets: Function called");
   const preferences = getPreferenceValues<Preferences>();
   const notion = new Client({ auth: preferences.notionToken });
@@ -47,56 +100,127 @@ export async function fetchSnippets(onProgress?: (count: number) => void, onBatc
   const dbIdsRaw = (preferences.databaseIds || "").replace(/[\[\]"']/g, "").split(",");
   const dbIds = Array.from(new Set(dbIdsRaw.map((id) => id.trim()).filter(id => id.length > 5)));
   
-  console.log(`fetchSnippets: Starting parallel fetch for ${dbIds.length} databases`);
+  console.log(`fetchSnippets: Starting parallel fetch for ${dbIds.length} databases (NO LIMITS)`);
 
   let totalFound = 0;
   let totalExtracted = 0;
-  const fetchTasks = dbIds.map(async (dbId) => {
+  
+  // Process databases sequentially instead of in parallel to reduce memory peak
+  // This is slower but much safer for large datasets
+  const allSnippets: SnippetIndex[] = [];
+  
+  for (const dbId of dbIds) {
+    const dbSnippets = await (async () => {
     try {
       console.log(`fetchSnippets: [${dbId}] Starting fetch...`);
-      const snippets: Snippet[] = [];
+      const snippets: SnippetIndex[] = [];
       let hasMore = true;
       let startCursor: string | undefined = undefined;
       let pageCount = 0;
 
-      while (hasMore && pageCount < 100) { // Safety break
-        pageCount++;
-        console.log(`fetchSnippets: [${dbId}] Querying page ${pageCount} (cursor: ${startCursor || "start"})`);
-        const response = await withRetry(() => notion.databases.query({
-          database_id: dbId,
-          start_cursor: startCursor,
-        }));
+      // NO LIMITS - fetch all data with retry support
+      const MAX_RETRIES = 3;
+      let retryCount = 0;
+      
+      while (hasMore) {
+        try {
+          pageCount++;
+          console.log(`fetchSnippets: [${dbId}] Querying page ${pageCount} (cursor: ${startCursor || "start"})`);
+          
+          const response = await withRetry(() => notion.databases.query({
+            database_id: dbId,
+            start_cursor: startCursor,
+          }));
 
-        console.log(`fetchSnippets: [${dbId}] Received page ${pageCount} (${response.results.length} results)`);
-        
-        let pageExtracted = 0;
-        for (const page of response.results) {
-          if ("properties" in page) {
-            const snippet = extractSnippetFromPage(page, dbId);
-            if (snippet) {
-              snippets.push(snippet);
-              pageExtracted++;
+          console.log(`fetchSnippets: [${dbId}] Received page ${pageCount} (${response.results.length} results)`);
+          
+          let pageExtracted = 0;
+          for (const page of response.results) {
+            if ("properties" in page) {
+              const snippet = extractSnippetIndexFromPage(page, dbId);
+              if (snippet) {
+                snippets.push(snippet);
+                pageExtracted++;
+              }
             }
           }
+
+          totalFound += response.results.length;
+          totalExtracted += pageExtracted;
+          
+          console.log(`fetchSnippets: [${dbId}] Extracted ${pageExtracted}/${response.results.length} from this page`);
+
+          // Batch updates: use very small batches and immediate processing
+          if (onBatch && pageExtracted > 0) {
+            // Send only the new items from this page, not all accumulated items
+            const newItems = snippets.slice(-pageExtracted);
+            // Very small batch size (5) to minimize memory pressure
+            const BATCH_SIZE = 5;
+            for (let i = 0; i < newItems.length; i += BATCH_SIZE) {
+              const batch = newItems.slice(i, i + BATCH_SIZE);
+              onBatch(batch);
+              // Delay between batches to allow processing and GC
+              if (i + BATCH_SIZE < newItems.length) {
+                await new Promise(resolve => setTimeout(resolve, 50));
+              }
+            }
+          }
+          
+          if (onProgress) onProgress(totalExtracted);
+          
+          // Aggressive cleanup: clear old items from memory every 10 pages
+          if (pageCount % 10 === 0 && snippets.length > 100) {
+            console.log(`fetchSnippets: [${dbId}] Memory cleanup: keeping last 100 items, clearing older ones`);
+            // Keep only the most recent 100 items in memory during fetch
+            // The rest are already sent via onBatch
+            snippets.splice(0, snippets.length - 100);
+          }
+          
+          // Small delay every 50 pages to allow GC
+          if (pageCount % 50 === 0) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+
+          hasMore = response.has_more;
+          startCursor = response.next_cursor || undefined;
+          retryCount = 0; // Reset retry count on success
+          
+        } catch (error: any) {
+          const errorMessage = error?.message || String(error);
+          const isMemoryError = errorMessage.includes("memory") || errorMessage.includes("heap");
+          
+          console.error(`fetchSnippets: [${dbId}] Error on page ${pageCount}:`, errorMessage);
+          
+          if (isMemoryError && retryCount < MAX_RETRIES && onError) {
+            retryCount++;
+            console.log(`fetchSnippets: [${dbId}] Memory error detected, attempting recovery (attempt ${retryCount}/${MAX_RETRIES})`);
+            
+            // Clear accumulated snippets to free memory
+            const savedCount = snippets.length;
+            snippets.splice(0, snippets.length);
+            
+            // Notify error handler
+            const shouldRetry = await onError(error, dbId, pageCount, startCursor);
+            
+            if (shouldRetry) {
+              console.log(`fetchSnippets: [${dbId}] Retrying from page ${pageCount} (saved ${savedCount} items so far)`);
+              // Wait a bit before retry to allow GC
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              continue; // Retry the same page
+            } else {
+              console.log(`fetchSnippets: [${dbId}] Recovery cancelled by error handler`);
+              break;
+            }
+          } else {
+            // Non-memory error or max retries reached
+            throw error;
+          }
         }
-
-        totalFound += response.results.length;
-        totalExtracted += pageExtracted;
-        
-        console.log(`fetchSnippets: [${dbId}] Extracted ${pageExtracted}/${response.results.length} from this page`);
-
-        if (onBatch && pageExtracted > 0) {
-          onBatch(snippets.slice(-pageExtracted));
-        }
-        
-        if (onProgress) onProgress(totalExtracted);
-
-        hasMore = response.has_more;
-        startCursor = response.next_cursor || undefined;
       }
       
-      if (pageCount >= 100) {
-        console.warn(`fetchSnippets: [${dbId}] Safety break hit at 100 pages. Possible infinite loop?`);
+      // No limits - just log progress
+      if (pageCount > 0 && pageCount % 50 === 0) {
+        console.log(`fetchSnippets: [${dbId}] Progress: ${pageCount} pages, ${snippets.length} snippets`);
       }
 
       console.log(`fetchSnippets: [${dbId}] Completed. Collected ${snippets.length} total.`);
@@ -105,15 +229,20 @@ export async function fetchSnippets(onProgress?: (count: number) => void, onBatc
       console.error(`fetchSnippets: [${dbId}] Error:`, error);
       return [];
     }
-  });
+    })();
+    
+    allSnippets.push(...dbSnippets);
+    totalExtracted += dbSnippets.length;
+    
+    // Clear memory after each database - small delay to allow GC
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
 
-  const results = await Promise.all(fetchTasks);
-  const allSnippets = results.flat();
   console.log(`fetchSnippets: Sync Finished. Total Results: ${totalFound}, Successfully Extracted: ${allSnippets.length}`);
   return allSnippets;
 }
 
-function extractSnippetFromPage(page: any, dbId: string): Snippet | null {
+function extractSnippetIndexFromPage(page: any, dbId: string): SnippetIndex | null {
   const props = page.properties;
   if (!props) return null;
 
@@ -238,16 +367,21 @@ function extractSnippetFromPage(page: any, dbId: string): Snippet | null {
 
   if (!content) {
     // If we have snippets but they are failing to extract the content property, this is the main issue.
-    // console.log(`extractSnippetFromPage: Failed to extract content. Page ID: ${page.id}, Properties present:`, Object.keys(props).join(", "));
+    // console.log(`extractSnippetIndexFromPage: Failed to extract content. Page ID: ${page.id}, Properties present:`, Object.keys(props).join(", "));
     return null;
   }
 
+  // Store only preview (first 500 chars) and length - full content loaded on demand
+  const contentPreview = content.length > 500 ? content.substring(0, 500) + "..." : content;
+  const contentLength = content.length;
+
   return {
     id: page.id,
-    name,
-    content,
-    trigger,
-    description,
+    name: name, // No length limit
+    contentPreview,
+    contentLength,
+    trigger: trigger, // No length limit
+    description: description && description.length > 1000 ? description.substring(0, 1000) + "..." : description,
     databaseId: dbId,
     preview,
     usageCount,
@@ -257,6 +391,14 @@ function extractSnippetFromPage(page: any, dbId: string): Snippet | null {
     typeColor,
     status,
     statusColor,
+  };
+}
+
+// Helper to convert index to full snippet (for backward compatibility)
+export function snippetIndexToSnippet(index: SnippetIndex, content: string): Snippet {
+  return {
+    ...index,
+    content,
   };
 }
 

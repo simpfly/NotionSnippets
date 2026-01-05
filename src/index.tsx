@@ -1,8 +1,8 @@
 import { ActionPanel, Action, List, useNavigation, Clipboard, showToast, Toast, open, Icon, getPreferenceValues, confirmAlert, Alert, Color, closeMainWindow } from "@raycast/api"; 
 import { useCachedState } from "@raycast/utils";
 import { useEffect, useState, useMemo, useRef } from "react";
-import { fetchSnippets, fetchDatabases, updateSnippetUsage } from "./api/notion";
-import { Snippet, Preferences, DatabaseMetadata } from "./types/index";
+import { fetchSnippets, fetchDatabases, updateSnippetUsage, fetchSnippetContent, snippetIndexToSnippet } from "./api/notion";
+import { Snippet, SnippetIndex, Preferences, DatabaseMetadata } from "./types/index";
 import { parsePlaceholders, processOfficialPlaceholders } from "./utils/placeholder";
 import SnippetForm from "./components/SnippetForm";
 import FillerForm from "./components/FillerForm";
@@ -14,23 +14,75 @@ import { exec } from "child_process";
 export default function Command() {
   console.log("Rendering Notion Snippets Command...");
 
-  // State
+  // State - use lightweight indexes instead of full snippets
   const preferences = getPreferenceValues<Preferences>();
   const [showMetadata, setShowMetadata] = useCachedState<boolean>("show-metadata", preferences.showMetadata);
-  const [snippets, setSnippets] = useCachedState<Snippet[]>("notion-snippets", []);
+  const [snippetIndexes, setSnippetIndexes] = useCachedState<SnippetIndex[]>("notion-snippet-indexes", []);
   const [databases, setDatabases] = useCachedState<DatabaseMetadata[]>("notion-databases", []);
+  
+  // LRU Cache for full content - reduced to 20 items to prevent memory issues
+  const contentCacheRef = useRef<Map<string, { content: string; lastAccess: number }>>(new Map());
+  const MAX_CONTENT_CACHE_SIZE = 20;
+  
+  // Loading states for individual snippets
+  const loadingContentRef = useRef<Set<string>>(new Set());
   const [selectedDbId, setSelectedDbId] = useState<string>("all");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [searchText, setSearchText] = useState("");
-  const [isLoading, setIsLoading] = useState(snippets.length === 0);
+  const [isLoading, setIsLoading] = useState(snippetIndexes.length === 0);
   const [dbStatus, setDbStatus] = useState<string>("Initializing...");
+  const [loadedContents, setLoadedContents] = useState<Map<string, string>>(new Map());
   const isSyncingRef = useRef(false);
   const lastSyncTimeRef = useRef(0);
   const hasAttemptedInitialLoad = useRef(false);
+  const batchUpdateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingBatchRef = useRef<SnippetIndex[]>([]);
+  const retryAttemptRef = useRef(0);
+  const lastSavedCountRef = useRef(0);
 
-  useEffect(() => {
-    console.log(`Index: useEffect[load] triggered. isSyncingRef=${isSyncingRef.current}, snippets=${snippets.length}`);
-  }, []);
+  // Function to load full content on demand
+  const loadSnippetContent = async (index: SnippetIndex): Promise<string> => {
+    // Check cache first
+    const cached = contentCacheRef.current.get(index.id);
+    if (cached) {
+      cached.lastAccess = Date.now();
+      return cached.content;
+    }
+    
+    // Check if already loading
+    if (loadingContentRef.current.has(index.id)) {
+      // Wait a bit and retry
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const retryCached = contentCacheRef.current.get(index.id);
+      if (retryCached) return retryCached.content;
+    }
+    
+    // If content is short, use preview
+    if (index.contentLength && index.contentLength <= 500 && index.contentPreview) {
+      return index.contentPreview;
+    }
+    
+    // Load from API
+    loadingContentRef.current.add(index.id);
+    try {
+      const content = await fetchSnippetContent(index.id);
+      
+      // Update cache with LRU eviction - very aggressive cleanup
+      if (contentCacheRef.current.size >= MAX_CONTENT_CACHE_SIZE) {
+        // Remove least recently used - remove 70% to be very aggressive
+        const entries = Array.from(contentCacheRef.current.entries());
+        entries.sort((a, b) => a[1].lastAccess - b[1].lastAccess);
+        const toRemove = entries.slice(0, Math.floor(MAX_CONTENT_CACHE_SIZE * 0.7)); // Remove 70%
+        toRemove.forEach(([id]) => contentCacheRef.current.delete(id));
+      }
+      
+      contentCacheRef.current.set(index.id, { content, lastAccess: Date.now() });
+      setLoadedContents(new Map(contentCacheRef.current));
+      return content;
+    } finally {
+      loadingContentRef.current.delete(index.id);
+    }
+  };
 
   const dbMap = useMemo(() => {
     const map: Record<string, DatabaseMetadata> = {};
@@ -77,21 +129,104 @@ export default function Command() {
              if (isMounted) {
                setDbStatus(`Syncing... checked ${count} items so far.`);
                setIsLoading(false); // Definitely stop loading once we have progress
+               lastSavedCountRef.current = count;
              }
           },
           (batch) => {
+            // Immediate processing with minimal batching to prevent memory buildup
             if (isMounted && batch.length > 0) {
-              setSnippets(prev => {
-                const map = new Map(prev.map(s => [s.id, s]));
-                batch.forEach(s => map.set(s.id, s));
-                return Array.from(map.values());
-              });
+              // Limit pending batch size to prevent accumulation
+              if (pendingBatchRef.current.length > 50) {
+                // Process existing batches first
+                const batchesToProcess = pendingBatchRef.current.splice(0, 50);
+                setSnippetIndexes(prev => {
+                  const map = new Map(prev.map(s => [s.id, s]));
+                  batchesToProcess.forEach(s => map.set(s.id, s));
+                  return Array.from(map.values());
+                });
+              }
+              
+              pendingBatchRef.current.push(...batch);
+              
+              // Clear existing timeout
+              if (batchUpdateTimeoutRef.current) {
+                clearTimeout(batchUpdateTimeoutRef.current);
+              }
+              
+              // Very frequent updates: every 100ms or when batch reaches 10 items
+              batchUpdateTimeoutRef.current = setTimeout(() => {
+                if (isMounted && pendingBatchRef.current.length > 0) {
+                  const batchesToProcess = pendingBatchRef.current.splice(0, 10);
+                  setSnippetIndexes(prev => {
+                    const map = new Map(prev.map(s => [s.id, s]));
+                    let hasChanges = false;
+                    batchesToProcess.forEach(s => {
+                      const existing = map.get(s.id);
+                      if (!existing || existing.name !== s.name) {
+                        map.set(s.id, s);
+                        hasChanges = true;
+                      }
+                    });
+                    return hasChanges ? Array.from(map.values()) : prev;
+                  });
+                  
+                  // Aggressive cleanup: clear content cache more frequently
+                  if (contentCacheRef.current.size > 20) {
+                    const entries = Array.from(contentCacheRef.current.entries());
+                    entries.sort((a, b) => a[1].lastAccess - b[1].lastAccess);
+                    const toRemove = entries.slice(0, 10);
+                    toRemove.forEach(([id]) => contentCacheRef.current.delete(id));
+                  }
+                }
+              }, 100);
             }
+          },
+          async (error, dbId, pageCount, cursor) => {
+            // Error handler for memory errors - returns true to retry
+            const errorMessage = error?.message || String(error);
+            const isMemoryError = errorMessage.includes("memory") || errorMessage.includes("heap");
+            
+            if (isMemoryError && retryAttemptRef.current < 3) {
+              retryAttemptRef.current++;
+              
+              if (isMounted) {
+                setDbStatus(`Memory error detected. Cleaning up and retrying... (Attempt ${retryAttemptRef.current}/3)`);
+                
+                // Aggressive cleanup
+                contentCacheRef.current.clear();
+                pendingBatchRef.current = [];
+                
+                // Force GC by clearing state temporarily
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                // Show toast
+                showToast({
+                  style: Toast.Style.Animated,
+                  title: `Memory cleanup (Attempt ${retryAttemptRef.current}/3)`,
+                  message: `Recovered ${lastSavedCountRef.current} items. Retrying...`
+                });
+              }
+              
+              return true; // Retry
+            }
+            
+            return false; // Don't retry
           }
         );
         
         if (isMounted) {
-          setSnippets(prev => {
+          // Process any pending batches first
+          if (pendingBatchRef.current.length > 0) {
+            if (batchUpdateTimeoutRef.current) {
+              clearTimeout(batchUpdateTimeoutRef.current);
+              batchUpdateTimeoutRef.current = null;
+            }
+            const pending = pendingBatchRef.current.splice(0);
+            allData.push(...pending);
+          }
+          
+          // NO LIMITS - store all indexes
+          setSnippetIndexes(prev => {
              const map = new Map(prev.map(s => [s.id, s]));
              allData.forEach(s => map.set(s.id, s));
              return Array.from(map.values());
@@ -100,18 +235,56 @@ export default function Command() {
         }
       } catch (error) {
         if (isMounted) {
+          const errorMessage = String(error);
+          const isMemoryError = errorMessage.includes("memory") || errorMessage.includes("heap");
+          
           console.error("Index: Sync failed", error);
-          setDbStatus(`Sync Error: ${String(error)}`);
+          
+          if (isMemoryError && retryAttemptRef.current < 3) {
+            // Auto-retry on memory error
+            retryAttemptRef.current++;
+            setDbStatus(`Memory error. Auto-retrying... (Attempt ${retryAttemptRef.current}/3)`);
+            
+            // Clean up aggressively
+            contentCacheRef.current.clear();
+            pendingBatchRef.current = [];
+            
+            // Wait and retry
+            setTimeout(() => {
+              if (isMounted) {
+                load();
+              }
+            }, 2000);
+            return; // Don't set loading to false yet
+          } else {
+            setDbStatus(`Sync Error: ${errorMessage}`);
+            showToast({
+              style: Toast.Style.Failure,
+              title: "Sync Failed",
+              message: isMemoryError 
+                ? "Memory limit reached. Try reducing batch size or clearing cache."
+                : errorMessage
+            });
+          }
         }
       } finally {
-        isSyncingRef.current = false;
-        if (isMounted) setIsLoading(false);
+        if (!isMounted || retryAttemptRef.current >= 3) {
+          isSyncingRef.current = false;
+          retryAttemptRef.current = 0; // Reset retry count
+          if (isMounted) setIsLoading(false);
+        }
       }
     }
     load();
     return () => { 
       isMounted = false; 
       isSyncingRef.current = false; // Release lock on unmount (fixes Strict Mode double-invoke)
+      // Clean up timeout and pending batches to prevent memory leaks
+      if (batchUpdateTimeoutRef.current) {
+        clearTimeout(batchUpdateTimeoutRef.current);
+        batchUpdateTimeoutRef.current = null;
+      }
+      pendingBatchRef.current = [];
     };
   }, []); // Run ONLY on mount. Manual re-sync handles the rest.
 
@@ -136,21 +309,94 @@ export default function Command() {
       setDatabases(dbs || []);
 
       // 2. Fetch Snippets with progress and incremental loading
+      retryAttemptRef.current = 0; // Reset retry count
       const data = await fetchSnippets(
         (count) => {
           toast.message = `Fetched ${count} snippets...`;
+          lastSavedCountRef.current = count;
         },
         (batch) => {
-          setSnippets(prev => {
-            const map = new Map(prev.map(s => [s.id, s]));
-            batch.forEach(s => map.set(s.id, s));
-            return Array.from(map.values());
-          });
+          // Use smaller batches and more frequent updates
+          pendingBatchRef.current.push(...batch);
+          
+          if (batchUpdateTimeoutRef.current) {
+            clearTimeout(batchUpdateTimeoutRef.current);
+          }
+          
+          // Limit pending batch size
+          if (pendingBatchRef.current.length > 50) {
+            const batchesToProcess = pendingBatchRef.current.splice(0, 50);
+            setSnippetIndexes(prev => {
+              const map = new Map(prev.map(s => [s.id, s]));
+              batchesToProcess.forEach(s => map.set(s.id, s));
+              return Array.from(map.values());
+            });
+          }
+          
+          batchUpdateTimeoutRef.current = setTimeout(() => {
+            if (pendingBatchRef.current.length > 0) {
+              const batchesToProcess = pendingBatchRef.current.splice(0, 10);
+              setSnippetIndexes(prev => {
+                const map = new Map(prev.map(s => [s.id, s]));
+                let hasChanges = false;
+                batchesToProcess.forEach(s => {
+                  const existing = map.get(s.id);
+                  if (!existing || existing.name !== s.name) {
+                    map.set(s.id, s);
+                    hasChanges = true;
+                  }
+                });
+                return hasChanges ? Array.from(map.values()) : prev;
+              });
+              
+              // Aggressive cleanup
+              if (contentCacheRef.current.size > 20) {
+                const entries = Array.from(contentCacheRef.current.entries());
+                entries.sort((a, b) => a[1].lastAccess - b[1].lastAccess);
+                const toRemove = entries.slice(0, 10);
+                toRemove.forEach(([id]) => contentCacheRef.current.delete(id));
+              }
+            }
+          }, 100);
+        },
+        async (error, dbId, pageCount, cursor) => {
+          // Error handler for memory errors
+          const errorMessage = error?.message || String(error);
+          const isMemoryError = errorMessage.includes("memory") || errorMessage.includes("heap");
+          
+          if (isMemoryError && retryAttemptRef.current < 3) {
+            retryAttemptRef.current++;
+            
+            toast.style = Toast.Style.Animated;
+            toast.title = `Memory Cleanup (${retryAttemptRef.current}/3)`;
+            toast.message = `Recovered ${lastSavedCountRef.current} items. Retrying...`;
+            
+            // Aggressive cleanup
+            contentCacheRef.current.clear();
+            pendingBatchRef.current = [];
+            
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            return true; // Retry
+          }
+          
+          return false; // Don't retry
         }
       );
       
+      // Process any pending batches before final merge
+      if (pendingBatchRef.current.length > 0) {
+        if (batchUpdateTimeoutRef.current) {
+          clearTimeout(batchUpdateTimeoutRef.current);
+          batchUpdateTimeoutRef.current = null;
+        }
+        const pending = pendingBatchRef.current.splice(0);
+        data.push(...pending);
+      }
+      
+      // NO LIMITS - store all indexes
       // Final merge
-      setSnippets(prev => {
+      setSnippetIndexes(prev => {
         const map = new Map(prev.map(s => [s.id, s]));
         data.forEach(s => map.set(s.id, s));
         return Array.from(map.values());
@@ -166,12 +412,39 @@ export default function Command() {
       toast.message = status;
       
     } catch (error) {
+      const errorMessage = String(error);
+      const isMemoryError = errorMessage.includes("memory") || errorMessage.includes("heap");
+      
       console.error("refreshSnippets: Failed", error);
-      setDbStatus(`Error: ${String(error)}`);
-      toast.style = Toast.Style.Failure;
-      toast.title = "Sync Failed";
-      toast.message = String(error);
+      
+      if (isMemoryError && retryAttemptRef.current < 3) {
+        // Auto-retry on memory error
+        retryAttemptRef.current++;
+        toast.style = Toast.Style.Animated;
+        toast.title = `Auto-retrying (${retryAttemptRef.current}/3)`;
+        toast.message = "Cleaning up memory and retrying...";
+        
+        // Clean up aggressively
+        contentCacheRef.current.clear();
+        pendingBatchRef.current = [];
+        
+        // Wait and retry
+        setTimeout(() => {
+          refreshSnippets();
+        }, 2000);
+        return; // Don't set loading to false yet
+      } else {
+        setDbStatus(`Error: ${errorMessage}`);
+        toast.style = Toast.Style.Failure;
+        toast.title = "Sync Failed";
+        toast.message = isMemoryError 
+          ? "Memory limit reached after 3 retries. Try clearing cache or reducing data."
+          : errorMessage;
+      }
     } finally {
+      if (retryAttemptRef.current >= 3) {
+        retryAttemptRef.current = 0; // Reset retry count
+      }
       isSyncingRef.current = false;
       setIsLoading(false);
     }
@@ -189,8 +462,9 @@ export default function Command() {
     // Show immediate feedback
     const toast = await showToast({ style: Toast.Style.Animated, title: "Clearing Cache & Restarting..." });
     
-    setSnippets([]); 
+    setSnippetIndexes([]); 
     setDatabases([]);
+    contentCacheRef.current.clear();
     setIsLoading(true);
     
     // We call refreshSnippets which will handle the rest of the Toast updates
@@ -201,7 +475,7 @@ export default function Command() {
 
   const increaseUsage = (snippetId: string) => {
     // 1. Optimistic Update (Immediate UI feedback)
-    const updatedSnippets = snippets.map(s => {
+    const updatedIndexes = snippetIndexes.map(s => {
         if (s.id === snippetId) {
             return { 
                 ...s, 
@@ -212,10 +486,10 @@ export default function Command() {
         return s;
     });
     // Sort logic will automatically re-order them on next render if we updating state
-    setSnippets(updatedSnippets);
+    setSnippetIndexes(updatedIndexes);
 
     // 2. Fire and Forget API Update (Background)
-    const snippet = snippets.find(s => s.id === snippetId);
+    const snippet = snippetIndexes.find(s => s.id === snippetId);
     if (snippet) {
         // Use the OLD count for the increment logic in the API helper if needed, 
         // but here we pass the CURRENT known count. The API helper adds 1.
@@ -225,9 +499,18 @@ export default function Command() {
     }
   };
 
-  const handleSelect = async (snippet: Snippet) => {
-    console.log(`handleSelect: Processing snippet "${snippet.name}"`);
-    if (!snippet || !snippet.content) return;
+  const handleSelect = async (index: SnippetIndex) => {
+    console.log(`handleSelect: Processing snippet "${index.name}"`);
+    if (!index) return;
+    
+    // Load full content on demand
+    const content = await loadSnippetContent(index);
+    if (!content) {
+      showToast({ style: Toast.Style.Failure, title: "Failed to load content" });
+      return;
+    }
+    
+    const snippet: Snippet = snippetIndexToSnippet(index, content);
     
     // Expand official Raycast placeholders first
     const clipboardText = await Clipboard.readText() || "";
@@ -262,9 +545,17 @@ export default function Command() {
 
   const exportSelectedAndReveal = async () => {
     try {
-      const itemsToExport = (selectedIds?.length || 0) > 0 
-        ? snippets.filter(s => selectedIds.includes(s.id))
-        : snippets; 
+      const indexesToExport = (selectedIds?.length || 0) > 0 
+        ? snippetIndexes.filter(s => selectedIds.includes(s.id))
+        : snippetIndexes;
+      
+      // Load full content for export
+      const itemsToExport = await Promise.all(
+        indexesToExport.map(async (index) => {
+          const content = await loadSnippetContent(index);
+          return snippetIndexToSnippet(index, content);
+        })
+      ); 
 
       if ((itemsToExport?.length || 0) === 0) {
         throw new Error("No snippets selected to export.");
@@ -312,7 +603,7 @@ export default function Command() {
   };
 
   const filteredAndSortedSnippets = useMemo(() => {
-    return (snippets || [])
+    return (snippetIndexes || [])
       .filter((snippet) => {
         if (selectedDbId !== "all" && snippet.databaseId !== selectedDbId) return false;
 
@@ -351,15 +642,15 @@ export default function Command() {
         // Name alphabetical
         return a.name.localeCompare(b.name);
       });
-  }, [snippets, selectedDbId, searchText]);
+  }, [snippetIndexes, selectedDbId, searchText]);
 
   const placeholder = useMemo(() => {
-    const total = snippets.length;
+    const total = snippetIndexes.length;
     const filtered = filteredAndSortedSnippets.length;
     if (isLoading && total === 0) return "Connecting to Notion...";
     if (searchText) return `Found ${filtered} of ${total} snippets...`;
     return `Search across ${total} snippets...`;
-  }, [snippets.length, filteredAndSortedSnippets.length, searchText, isLoading]);
+  }, [snippetIndexes.length, filteredAndSortedSnippets.length, searchText, isLoading]);
 
   return (
     <List 
@@ -409,7 +700,7 @@ export default function Command() {
                 setIsLoading(true);
                 Promise.all([fetchSnippets(), fetchDatabases()]).then(([data, dbs]) => {
                   const safeData = data || [];
-                  setSnippets(safeData);
+                  setSnippetIndexes(safeData);
                   setDatabases(dbs);
                   setDbStatus(safeData.length > 0 ? `Loaded ${safeData.length} snippets` : "Still no snippets found.");
                   setIsLoading(false);
@@ -431,29 +722,40 @@ export default function Command() {
           </ActionPanel>
         }
       />
-      {filteredAndSortedSnippets.map((snippet) => {
-          const placeholders = parsePlaceholders(snippet.content);
-          // Highlight placeholders: {{key}} -> `{{key}}` (using code style for visibility)
-          // We use a regex that matches either {key} or {{key}} and wraps it in backticks and bold
-          let highlightedContent = snippet.content.replace(/(\{?\{{1,2}.*?\}{1,2}\}?)/g, "**`$1`**");
-
-          if (snippet.preview) {
-            // Use HTML img tag for right alignment and size control (Raycast supports this subset)
-            // height="150" makes it "smaller"
-            // align="right" floats it to the top-right
-            highlightedContent = `<img src="${snippet.preview}" alt="Preview" height="150" align="right" />\n\n` + highlightedContent;
+      {filteredAndSortedSnippets.map((index) => {
+          // Load content on demand for preview
+          const cachedContent = contentCacheRef.current.get(index.id);
+          const displayContent = cachedContent?.content || index.contentPreview || "Loading...";
+          
+          // Parse placeholders from preview or cached content
+          let placeholders: string[] = [];
+          if (cachedContent?.content) {
+            placeholders = parsePlaceholders(cachedContent.content);
+          } else if (index.contentPreview) {
+            placeholders = parsePlaceholders(index.contentPreview);
+          }
+          
+          // Highlight content
+          let highlightedContent = displayContent.replace(/(\{?\{{1,2}.*?\}{1,2}\}?)/g, "**`$1`**");
+          if (index.preview) {
+            highlightedContent = `<img src="${index.preview}" alt="Preview" height="150" align="right" />\n\n` + highlightedContent;
+          }
+          
+          // Add loading indicator if content is not fully loaded
+          if (!cachedContent && index.contentLength && index.contentLength > 500) {
+            highlightedContent += "\n\n*[Click to load full content]*";
           }
 
           return (
             <List.Item
-              key={snippet.id}
-              id={snippet.id}
-              icon={dbMap[snippet.databaseId || ""]?.icon || (snippet.typeColor ? { source: Icon.Dot, tintColor: snippet.typeColor as Color } : Icon.Dot)}
-              title={snippet.name}
-              keywords={snippet.trigger ? [snippet.trigger] : []}
+              key={index.id}
+              id={index.id}
+              icon={dbMap[index.databaseId || ""]?.icon || (index.typeColor ? { source: Icon.Dot, tintColor: index.typeColor as Color } : Icon.Dot)}
+              title={index.name}
+              keywords={index.trigger ? [index.trigger] : []}
               accessories={[
-                ...(snippet.type ? [{ tag: { value: snippet.type, color: snippet.typeColor as Color } }] : []),
-                ...(snippet.trigger ? [{ tag: { value: snippet.trigger, color: Color.Blue } }] : [])
+                ...(index.type ? [{ tag: { value: index.type, color: index.typeColor as Color } }] : []),
+                ...(index.trigger ? [{ tag: { value: index.trigger, color: Color.Blue } }] : [])
               ]}
               detail={
                 <List.Item.Detail 
@@ -462,31 +764,31 @@ export default function Command() {
                     showMetadata ? (
                     <List.Item.Detail.Metadata>
                       <List.Item.Detail.Metadata.Label title="Information" />
-                      <List.Item.Detail.Metadata.Label title="Name" text={snippet.name} />
-                      {snippet.type && (
+                      <List.Item.Detail.Metadata.Label title="Name" text={index.name} />
+                      {index.type && (
                         <List.Item.Detail.Metadata.TagList title="Type">
-                          <List.Item.Detail.Metadata.TagList.Item text={snippet.type} color={snippet.typeColor as Color} />
+                          <List.Item.Detail.Metadata.TagList.Item text={index.type} color={index.typeColor as Color} />
                         </List.Item.Detail.Metadata.TagList>
                       )}
-                      {snippet.status && (
+                      {index.status && (
                         <List.Item.Detail.Metadata.TagList title="Status">
-                          <List.Item.Detail.Metadata.TagList.Item text={snippet.status} color={snippet.statusColor as Color} />
+                          <List.Item.Detail.Metadata.TagList.Item text={index.status} color={index.statusColor as Color} />
                         </List.Item.Detail.Metadata.TagList>
                       )}
-                      {snippet.trigger && (
-                        <List.Item.Detail.Metadata.Label title="Trigger" text={snippet.trigger} />
+                      {index.trigger && (
+                        <List.Item.Detail.Metadata.Label title="Trigger" text={index.trigger} />
                       )}
                       
                       <List.Item.Detail.Metadata.Separator />
                       <List.Item.Detail.Metadata.Label 
                         title="Usage" 
-                        text={`${snippet.usageCount || 0} times`} 
+                        text={`${index.usageCount || 0} times`} 
                         icon={Icon.BarChart}
                       />
-                      {snippet.lastUsed && (
+                      {index.lastUsed && (
                         <List.Item.Detail.Metadata.Label 
                           title="Last Used" 
-                          text={new Date(snippet.lastUsed).toLocaleString()} 
+                          text={new Date(index.lastUsed).toLocaleString()} 
                           icon={Icon.Clock}
                         />
                       )}
@@ -508,8 +810,8 @@ export default function Command() {
                       <List.Item.Detail.Metadata.Separator />
                       <List.Item.Detail.Metadata.Label 
                         title="Source" 
-                        text={dbMap[snippet.databaseId || ""]?.title || "Unknown"} 
-                        icon={dbMap[snippet.databaseId || ""]?.icon}
+                        text={dbMap[index.databaseId || ""]?.title || "Unknown"} 
+                        icon={dbMap[index.databaseId || ""]?.icon}
                       />
                     </List.Item.Detail.Metadata>
                     ) : undefined
@@ -519,7 +821,7 @@ export default function Command() {
               actions={
                 <ActionPanel>
               <ActionPanel.Section>
-                <Action title="Paste Snippet" icon={Icon.Clipboard} onAction={() => handleSelect(snippet)} />
+                <Action title="Paste Snippet" icon={Icon.Clipboard} onAction={() => handleSelect(index)} />
                 <Action 
                   title={showMetadata ? "Hide Metadata" : "Show Metadata"}
                   icon={showMetadata ? Icon.EyeDisabled : Icon.Eye}
@@ -531,8 +833,8 @@ export default function Command() {
                   icon={Icon.Link}
                   shortcut={{ modifiers: ["ctrl"], key: "n" }}
                   onAction={() => {
-                    if (snippet.url) {
-                      open(snippet.url);
+                    if (index.url) {
+                      open(index.url);
                     } else {
                       showToast({ style: Toast.Style.Failure, title: "No URL", message: "This snippet doesn't have a Notion URL" });
                     }
@@ -542,7 +844,11 @@ export default function Command() {
                   title="Edit Snippet"
                   icon={Icon.Pencil}
                   shortcut={{ modifiers: ["cmd"], key: "e" }}
-                  onAction={() => push(<SnippetForm snippet={snippet} onSuccess={refreshSnippets} />)}
+                  onAction={async () => {
+                    const content = await loadSnippetContent(index);
+                    const fullSnippet = snippetIndexToSnippet(index, content);
+                    push(<SnippetForm snippet={fullSnippet} onSuccess={refreshSnippets} />);
+                  }}
                 />
                 <Action
                   title="Create New Snippet"
@@ -570,7 +876,15 @@ export default function Command() {
                   shortcut={{ modifiers: ["cmd", "shift"], key: "e" }}
                   onAction={exportSelectedAndReveal}
                 />
-                <Action.CopyToClipboard title="Copy Raw Content" content={snippet.content} />
+                <Action 
+                  title="Copy Raw Content" 
+                  icon={Icon.Clipboard}
+                  onAction={async () => {
+                    const content = await loadSnippetContent(index);
+                    await Clipboard.copy(content);
+                    showToast({ style: Toast.Style.Success, title: "Content copied" });
+                  }}
+                />
               </ActionPanel.Section>
             </ActionPanel>
           }
