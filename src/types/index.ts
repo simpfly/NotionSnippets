@@ -4,7 +4,6 @@ export interface Snippet {
   content: string;
   trigger?: string;
   description?: string;
-  sourceDb?: string;
   databaseId?: string;
   preview?: string;
   usageCount?: number;
@@ -14,6 +13,12 @@ export interface Snippet {
   typeColor?: string;
   status?: string;
   statusColor?: string;
+}
+
+export interface DatabaseMetadata {
+  id: string;
+  title: string;
+  icon?: string;
 }
 
 export interface Preferences {

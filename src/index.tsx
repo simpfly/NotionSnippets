@@ -2,7 +2,7 @@ import { ActionPanel, Action, List, useNavigation, Clipboard, showToast, Toast, 
 import { useCachedState } from "@raycast/utils";
 import { useEffect, useState, useMemo } from "react";
 import { fetchSnippets, fetchDatabases, updateSnippetUsage } from "./api/notion";
-import { Snippet, Preferences } from "./types/index";
+import { Snippet, Preferences, DatabaseMetadata } from "./types/index";
 import { parsePlaceholders, processOfficialPlaceholders } from "./utils/placeholder";
 import SnippetForm from "./components/SnippetForm";
 import FillerForm from "./components/FillerForm";
@@ -18,12 +18,18 @@ export default function Command() {
   const preferences = getPreferenceValues<Preferences>();
   const [showMetadata, setShowMetadata] = useCachedState<boolean>("show-metadata", preferences.showMetadata);
   const [snippets, setSnippets] = useCachedState<Snippet[]>("notion-snippets", []);
-  const [databases, setDatabases] = useCachedState<{ id: string; title: string }[]>("notion-databases", []);
+  const [databases, setDatabases] = useCachedState<DatabaseMetadata[]>("notion-databases", []);
   const [selectedDbId, setSelectedDbId] = useState<string>("all");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [searchText, setSearchText] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [dbStatus, setDbStatus] = useState<string>("Initializing...");
+
+  const dbMap = useMemo(() => {
+    const map: Record<string, DatabaseMetadata> = {};
+    databases.forEach(db => { map[db.id] = db; });
+    return map;
+  }, [databases]);
   
 /**
  * ... (skipping unchanged lines for brevity in tool call, will target specific lines)
@@ -267,7 +273,7 @@ export default function Command() {
           <List.Dropdown.Section title="Databases">
             <List.Dropdown.Item title="All Snippets" value="all" />
             {databases.map((db) => (
-              <List.Dropdown.Item key={db.id} title={db.title} value={db.id} />
+              <List.Dropdown.Item key={db.id} title={db.title} value={db.id} icon={db.icon} />
             ))}
           </List.Dropdown.Section>
         </List.Dropdown>
@@ -330,7 +336,7 @@ export default function Command() {
             <List.Item
               key={snippet.id}
               id={snippet.id}
-              icon={Icon.Text}
+              icon={dbMap[snippet.databaseId || ""]?.icon || (snippet.typeColor ? { source: Icon.Dot, tintColor: snippet.typeColor as Color } : Icon.Dot)}
               title={snippet.name}
               keywords={snippet.trigger ? [snippet.trigger] : []}
               accessories={[
@@ -388,7 +394,11 @@ export default function Command() {
                       )}
 
                       <List.Item.Detail.Metadata.Separator />
-                      <List.Item.Detail.Metadata.Label title="Source" text={snippet.sourceDb} />
+                      <List.Item.Detail.Metadata.Label 
+                        title="Source" 
+                        text={dbMap[snippet.databaseId || ""]?.title || "Unknown"} 
+                        icon={dbMap[snippet.databaseId || ""]?.icon}
+                      />
                     </List.Item.Detail.Metadata>
                     ) : undefined
                   }

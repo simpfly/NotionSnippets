@@ -1,5 +1,5 @@
 import { Client } from "@notionhq/client";
-import { Preferences, Snippet } from "../types/index";
+import { Preferences, Snippet, DatabaseMetadata } from "../types/index";
 import { getPreferenceValues, showToast, Toast, Color } from "@raycast/api";
 
 function mapNotionColor(notionColor: string): string | undefined {
@@ -16,6 +16,14 @@ function mapNotionColor(notionColor: string): string | undefined {
     red: Color.Red,
   };
   return map[notionColor.toLowerCase()];
+}
+
+function extractIcon(iconObj: any): string | undefined {
+  if (!iconObj) return undefined;
+  if (iconObj.type === "emoji") return iconObj.emoji;
+  if (iconObj.type === "external") return iconObj.external.url;
+  if (iconObj.type === "file") return iconObj.file.url;
+  return undefined;
 }
 
 export async function fetchSnippets(): Promise<Snippet[]> {
@@ -53,6 +61,7 @@ export async function fetchSnippets(): Promise<Snippet[]> {
     try {
       // Fetch database details once per database
       let dbName = dbId;
+      let dbIcon = undefined;
       try {
         const dbInfo = await notion.databases.retrieve({ database_id: dbId });
         if ("title" in dbInfo && Array.isArray(dbInfo.title) && dbInfo.title.length > 0) {
@@ -60,8 +69,9 @@ export async function fetchSnippets(): Promise<Snippet[]> {
         } else if ("title" in dbInfo && Array.isArray(dbInfo.title)) {
           dbName = "Untitled Database";
         }
+        dbIcon = extractIcon((dbInfo as any).icon);
       } catch (e) {
-        console.warn(`Could not fetch title for DB ${dbId}`, e);
+        console.warn(`Could not fetch title or icon for DB ${dbId}`, e);
       }
 
       let hasMore = true;
@@ -224,7 +234,6 @@ export async function fetchSnippets(): Promise<Snippet[]> {
                 content,
                 trigger,
                 description,
-                sourceDb: dbName,
                 databaseId: dbId,
                 preview, 
                 usageCount,
@@ -404,12 +413,12 @@ export async function createSnippet(payload: {
   return response.id;
 }
 
-export async function fetchDatabases(): Promise<{ id: string; title: string }[]> {
+export async function fetchDatabases(): Promise<DatabaseMetadata[]> {
   const preferences = getPreferenceValues<Preferences>();
   const notion = new Client({ auth: preferences.notionToken });
   const dbIds = (preferences.databaseIds || "").replace(/[\[\]"']/g, "").split(",").map((id) => id.trim()).filter(id => id.length > 0);
   
-  const dbs: { id: string; title: string }[] = [];
+  const dbs: DatabaseMetadata[] = [];
   for (const id of dbIds) {
     try {
       const res = await notion.databases.retrieve({ database_id: id });
@@ -417,7 +426,8 @@ export async function fetchDatabases(): Promise<{ id: string; title: string }[]>
       if ("title" in res && Array.isArray(res.title)) {
         title = res.title[0]?.plain_text || title;
       }
-      dbs.push({ id, title });
+      const icon = extractIcon((res as any).icon);
+      dbs.push({ id, title, icon });
     } catch (e) {
       console.error(`Failed to fetch title for DB ${id}`, e);
       dbs.push({ id, title: `Database (${id.substring(0, 6)}...)` });
