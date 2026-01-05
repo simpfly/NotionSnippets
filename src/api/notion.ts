@@ -141,6 +141,20 @@ export async function fetchSnippets(): Promise<Snippet[]> {
                }
             } catch (e) { console.log("Error extracting description", e); }
 
+            // Extract Usage Stats
+            const usageProp = findProp(["usage count", "usage", "count", "times used", "copy count", "使用次数", "使用", "次数"]);
+            const lastUsedProp = findProp(["last used", "last used at", "recent", "time", "date", "最后使用", "时间", "日期"]);
+
+            let usageCount = 0;
+            if (usageProp?.type === "number") {
+               usageCount = (usageProp as any).number || 0;
+            }
+
+            let lastUsed = undefined;
+            if (lastUsedProp?.type === "date") {
+               lastUsed = (lastUsedProp as any).date?.start;
+            }
+
             // Extract Preview Image
             const previewProp = findProp(["preview", "image", "thumb", "picture", "预览图", "img", "pic"]);
             let preview = undefined;
@@ -184,6 +198,8 @@ export async function fetchSnippets(): Promise<Snippet[]> {
                 sourceDb: dbName,
                 databaseId: dbId,
                 preview, 
+                usageCount,
+                lastUsed,
               });
             }
           }
@@ -250,6 +266,58 @@ export async function updateSnippet(
     page_id: pageId,
     properties: properties,
   });
+}
+
+export async function updateSnippetUsage(
+  pageId: string,
+  currentUsageCount: number = 0
+): Promise<void> {
+  const preferences = getPreferenceValues<Preferences>();
+  const notion = new Client({ auth: preferences.notionToken });
+
+  try {
+      // We need to find the correct property names again since they might vary per database
+      // Optimization: We can't cache property IDs easily without more complex logic, 
+      // so we will query the page to get the property IDs or Names.
+      // But since this is "fire-and-forget", a little overhead is acceptable.
+      
+      const page = await notion.pages.retrieve({ page_id: pageId });
+      const props = (page as any).properties;
+
+      const findPropName = (names: string[], type: string) => {
+        return Object.keys(props).find((key) => {
+          const p = props[key];
+          return names.includes(key.toLowerCase()) && p.type === type;
+        });
+      };
+
+      const usageKey = findPropName(["usage count", "usage", "count", "times used", "copy count", "使用次数", "使用", "次数"], "number");
+      const lastUsedKey = findPropName(["last used", "last used at", "recent", "time", "date", "最后使用", "时间", "日期"], "date");
+
+      const properties: any = {};
+      
+      if (usageKey) {
+        properties[usageKey] = { number: currentUsageCount + 1 };
+      }
+      
+      if (lastUsedKey) {
+        properties[lastUsedKey] = { date: { start: new Date().toISOString() } };
+      }
+
+      if (Object.keys(properties).length > 0) {
+        await notion.pages.update({
+          page_id: pageId,
+          properties: properties,
+        });
+        console.log(`Updated usage for snippet ${pageId}: count=${currentUsageCount + 1}`);
+      } else {
+        console.warn(`Could not find Usage/Last Used properties for page ${pageId}`);
+      }
+
+  } catch (e) {
+    console.error(`Failed to update usage for snippet ${pageId}`, e);
+    // Suppress error toast since this is a background operation
+  }
 }
 
 export async function createSnippet(payload: {

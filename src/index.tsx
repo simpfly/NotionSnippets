@@ -1,7 +1,7 @@
 import { ActionPanel, Action, List, useNavigation, Clipboard, showToast, Toast, open, Icon, getPreferenceValues, confirmAlert, Alert, Color } from "@raycast/api"; 
 import { useCachedState } from "@raycast/utils";
 import { useEffect, useState } from "react";
-import { fetchSnippets, fetchDatabases } from "./api/notion";
+import { fetchSnippets, fetchDatabases, updateSnippetUsage } from "./api/notion";
 import { Snippet, Preferences } from "./types/index";
 import { parsePlaceholders, processOfficialPlaceholders } from "./utils/placeholder";
 import SnippetForm from "./components/SnippetForm";
@@ -82,6 +82,32 @@ export default function Command() {
     }
   };
 
+  const increaseUsage = (snippetId: string) => {
+    // 1. Optimistic Update (Immediate UI feedback)
+    const updatedSnippets = snippets.map(s => {
+        if (s.id === snippetId) {
+            return { 
+                ...s, 
+                usageCount: (s.usageCount || 0) + 1,
+                lastUsed: new Date().toISOString()
+            };
+        }
+        return s;
+    });
+    // Sort logic will automatically re-order them on next render if we updating state
+    setSnippets(updatedSnippets);
+
+    // 2. Fire and Forget API Update (Background)
+    const snippet = snippets.find(s => s.id === snippetId);
+    if (snippet) {
+        // Use the OLD count for the increment logic in the API helper if needed, 
+        // but here we pass the CURRENT known count. The API helper adds 1.
+        updateSnippetUsage(snippetId, snippet.usageCount || 0).catch(err => {
+            console.error("Background usage update failed", err);
+        });
+    }
+  };
+
   const handleSelect = async (snippet: Snippet) => {
     console.log(`handleSelect: Processing snippet "${snippet.name}"`);
     if (!snippet || !snippet.content) return;
@@ -104,9 +130,14 @@ export default function Command() {
     const placeholders = parsePlaceholders(expandedContent) || [];
     if (placeholders.length > 0) {
       console.log(`handleSelect: Found ${placeholders.length} custom placeholders, pushing FillerForm`);
-      push(<FillerForm snippet={{ ...snippet, content: expandedContent }} placeholders={placeholders} />);
+      push(<FillerForm 
+        snippet={{ ...snippet, content: expandedContent }} 
+        placeholders={placeholders} 
+        onPaste={() => increaseUsage(snippet.id)}
+      />);
     } else {
       console.log("handleSelect: No placeholders left, pasting content...");
+      increaseUsage(snippet.id);
       await Clipboard.paste(expandedContent);
     }
   };
@@ -261,6 +292,16 @@ export default function Command() {
           if (aArg && !bArg) return -1;
           if (!aArg && bArg) return 1;
 
+          // 3. Usage Count (High to Low)
+          const usageA = a.usageCount || 0;
+          const usageB = b.usageCount || 0;
+          if (usageA !== usageB) return usageB - usageA;
+
+          // 4. Last Used (New to Old)
+          const dateA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
+          const dateB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
+          if (dateA !== dateB) return dateB - dateA;
+
           return 0;
         })
         .map((snippet) => {
@@ -270,7 +311,10 @@ export default function Command() {
           let highlightedContent = snippet.content.replace(/(\{?\{{1,2}.*?\}{1,2}\}?)/g, "**`$1`**");
 
           if (snippet.preview) {
-            highlightedContent += `\n\n![Preview](${snippet.preview})`;
+            // Use HTML img tag for right alignment and size control (Raycast supports this subset)
+            // height="150" makes it "smaller"
+            // align="right" floats it to the top-right
+            highlightedContent = `<img src="${snippet.preview}" alt="Preview" height="150" align="right" />\n\n` + highlightedContent;
           }
 
           return (
@@ -293,6 +337,20 @@ export default function Command() {
                         <List.Item.Detail.Metadata.Label title="Trigger" text={snippet.trigger} />
                       )}
                       
+                      <List.Item.Detail.Metadata.Separator />
+                      <List.Item.Detail.Metadata.Label 
+                        title="Usage" 
+                        text={`${snippet.usageCount || 0} times`} 
+                        icon={Icon.BarChart}
+                      />
+                      {snippet.lastUsed && (
+                        <List.Item.Detail.Metadata.Label 
+                          title="Last Used" 
+                          text={new Date(snippet.lastUsed).toLocaleString()} 
+                          icon={Icon.Clock}
+                        />
+                      )}
+
                       {placeholders.length > 0 && (
                         <>
                           <List.Item.Detail.Metadata.Separator />

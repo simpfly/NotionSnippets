@@ -3,7 +3,7 @@
   "name": "notion-snippet-injector",
   "title": "Notion Snippet Injector",
   "description": "Inject snippets from multiple Notion databases with dynamic placeholders.",
-  "icon": "notion-icon-v2.png",
+  "icon": "icon.png",
   "author": "curiosita",
   "license": "MIT",
   "commands": [

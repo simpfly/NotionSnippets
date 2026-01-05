@@ -5,13 +5,15 @@ import { replacePlaceholders } from "../utils/placeholder";
 interface Props {
   snippet: Snippet;
   placeholders: string[];
+  onPaste?: () => void;
 }
 
-export default function FillerForm({ snippet, placeholders }: Props) {
+export default function FillerForm({ snippet, placeholders, onPaste }: Props) {
   const { pop } = useNavigation();
 
   const handleSubmit = (values: Record<string, string>) => {
     const finalContent = replacePlaceholders(snippet.content, values);
+    if (onPaste) onPaste();
     Clipboard.paste(finalContent);
     pop();
   };

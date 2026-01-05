@@ -7,6 +7,8 @@ export interface Snippet {
   sourceDb?: string;
   databaseId?: string;
   preview?: string;
+  usageCount?: number;
+  lastUsed?: string;
 }
 
 export interface Preferences {
