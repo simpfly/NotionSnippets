@@ -1001,6 +1001,33 @@ export default function Command() {
                   }}
                 />
                 <Action
+                  title="Import to Raycast Snippets"
+                  icon={Icon.Snippets}
+                  shortcut={{ modifiers: ["cmd", "shift"], key: "i" }}
+                  onAction={async () => {
+                    await showToast({ style: Toast.Style.Animated, title: "Preparing Import..." });
+                    const content = await loadSnippetContent(index);
+                    if (!content) {
+                      await showToast({ style: Toast.Style.Failure, title: "Failed to load content" });
+                      return;
+                    }
+                    
+                    // Try 'context' with multiple potential keys to hit the correct one
+                    const launchContext = {
+                      name: index.name,
+                      title: index.name,
+                      snippet: content,
+                      text: content,
+                      content: content,
+                      keyword: index.trigger || "",
+                      type: "snippet"
+                    };
+                    const url = `raycast://extensions/raycast/snippets/create-snippet?context=${encodeURIComponent(JSON.stringify(launchContext))}`;
+                    await open(url);
+                    await showToast({ style: Toast.Style.Success, title: "Import Window Opened" });
+                  }}
+                />
+                <Action
                   title="Edit Snippet"
                   icon={Icon.Pencil}
                   shortcut={{ modifiers: ["cmd"], key: "e" }}
@@ -1183,6 +1210,33 @@ export default function Command() {
                         } else {
                           showToast({ style: Toast.Style.Failure, title: "No URL", message: "This snippet doesn't have a Notion URL" });
                         }
+                      }}
+                    />
+                    <Action
+                      title="Import to Raycast Snippets"
+                      icon={Icon.Snippets}
+                      shortcut={{ modifiers: ["cmd", "shift"], key: "i" }}
+                      onAction={async () => {
+                        await showToast({ style: Toast.Style.Animated, title: "Preparing Import..." });
+                        const content = await loadSnippetContent(snippet);
+                         if (!content) {
+                          await showToast({ style: Toast.Style.Failure, title: "Failed to load content" });
+                          return;
+                        }
+                        
+                        // Try 'context' with multiple potential keys
+                        const launchContext = {
+                          name: snippet.name,
+                          title: snippet.name,
+                          snippet: content,
+                          text: content,
+                          content: content,
+                          keyword: snippet.trigger || "",
+                          type: "snippet"
+                        };
+                        const url = `raycast://extensions/raycast/snippets/create-snippet?context=${encodeURIComponent(JSON.stringify(launchContext))}`;
+                        await open(url);
+                        await showToast({ style: Toast.Style.Success, title: "Import Window Opened" });
                       }}
                     />
                     <Action
