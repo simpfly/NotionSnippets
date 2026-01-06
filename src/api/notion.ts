@@ -283,6 +283,11 @@ function extractSnippetIndexFromPage(page: any, dbId: string): SnippetIndex | nu
     }
   } catch (e) { /* silent */ }
 
+  // Fallback: Use Page Cover as preview if available
+  if (!preview && page.cover) {
+    preview = page.cover.type === "file" ? page.cover.file?.url : page.cover.external?.url;
+  }
+
   if (!content && description) content = description;
 
   if ((!name || name === "Untitled") && content) {
@@ -380,6 +385,17 @@ export async function updateSnippet(
     page_id: pageId,
     properties: properties,
   });
+}
+
+export async function deleteSnippet(pageId: string): Promise<void> {
+  const preferences = getPreferenceValues<Preferences>();
+  const notion = new Client({ auth: preferences.notionToken });
+  
+  await notion.pages.update({
+    page_id: pageId,
+    archived: true,
+  });
+  console.log(`Archived snippet ${pageId}`);
 }
 
 export async function updateSnippetUsage(

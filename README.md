@@ -19,6 +19,7 @@ Support **Hybrid Search** (Local Instant + Global Cloud) and **Import to Raycast
 - **🧩 Native Integration**:
   - **Import to Raycast**: One-click import Notion snippets into Raycast's native snippet manager (Cmd+Shift+I).
   - **Rich Metadata**: Hover to view full titles, tags, and source database info.
+  - **Archive/Delete**: "Delete" snippet actually archives it in Notion (`Ctrl+X`), preventing accidental data loss.
 
 - **🧠 Smart Support**:
   - **Microblogs ("Say")**: Automatically titles "Untitled" posts with their content.
@@ -67,6 +68,7 @@ _(The Database ID is the 32-char code in your Notion URL: `notion.so/myworkspace
 | `Cmd + E`         | Edit Snippet          | Edit the selected snippet.                        |
 | `Cmd + Shift + I` | **Import to Raycast** | Import to native Raycast Snippets.                |
 | `Cmd + Shift + E` | Export All            | Export snippets to JSON/CSV.                      |
+| `Ctrl + X`        | **Delete/Archive**    | Archive the snippet in Notion (Recoverable).      |
 
 <br/>
 
@@ -98,6 +100,7 @@ _(The Database ID is the 32-char code in your Notion URL: `notion.so/myworkspace
 - **🧩 原生级集成**:
   - **一键导入 Raycast**: 支持一键将 Notion 内容导入到 Raycast 原生 Snippet 管理器，从此告别复制粘贴 (Cmd+Shift+I)。
   - **丰富元数据**: 悬停查看完整标题、标签和来源数据库。
+  - **安全删除**: "删除" 操作实际上是将 Notion 页面归档 (`Ctrl+X`)，防止误删，可随时恢复。
 
 - **🧠 智能兼容**:
   - **微博客模式 ("Say")**: 支持 "Say" 微博客模式，自动将无标题内容的首行作为标题展示。
@@ -138,14 +141,15 @@ _(数据库 ID 是 Notion URL 中的 32 位字符: `notion.so/myworkspace/THIS_P
 
 ## ⚡️ 快捷操作
 
-| 快捷键            | 操作               | 说明                                 |
-| :---------------- | :----------------- | :----------------------------------- |
-| `Enter`           | 粘贴 Snippet       | 粘贴到当前应用 (自动填充变量)。      |
-| `Cmd + K`         | 操作菜单           | 显示所有可用操作。                   |
-| `Cmd + N`         | 新建               | 直接新建 Snippet 到 Notion。         |
-| `Cmd + E`         | 编辑               | 编辑选中的 Snippet。                 |
-| `Cmd + Shift + I` | **导入到 Raycast** | 导入到 Raycast 原生 Snippet 管理器。 |
-| `Cmd + Shift + E` | 导出所有           | 将 Snippet 导出为 JSON/CSV。         |
+| 快捷键            | 操作               | 说明                                   |
+| :---------------- | :----------------- | :------------------------------------- |
+| `Enter`           | 粘贴 Snippet       | 粘贴到当前应用 (自动填充变量)。        |
+| `Cmd + K`         | 操作菜单           | 显示所有可用操作。                     |
+| `Cmd + N`         | 新建               | 直接新建 Snippet 到 Notion。           |
+| `Cmd + E`         | 编辑               | 编辑选中的 Snippet。                   |
+| `Cmd + Shift + I` | **导入到 Raycast** | 导入到 Raycast 原生 Snippet 管理器。   |
+| `Cmd + Shift + E` | 导出所有           | 将 Snippet 导出为 JSON/CSV。           |
+| `Ctrl + X`        | **删除/归档**      | 将 Snippet 在 Notion 中归档 (可恢复)。 |
 
 <br/>
 

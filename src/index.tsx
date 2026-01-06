@@ -1,7 +1,7 @@
 import { ActionPanel, Action, List, useNavigation, Clipboard, showToast, Toast, open, Icon, getPreferenceValues, confirmAlert, Alert, Color, closeMainWindow, openCommandPreferences } from "@raycast/api"; 
 import { useCachedState } from "@raycast/utils";
 import { useEffect, useState, useMemo, useRef } from "react";
-import { fetchSnippets, fetchDatabases, updateSnippetUsage, fetchSnippetContent, snippetIndexToSnippet, searchNotionSnippets } from "./api/notion";
+import { fetchSnippets, fetchDatabases, updateSnippetUsage, fetchSnippetContent, snippetIndexToSnippet, searchNotionSnippets, deleteSnippet } from "./api/notion";
 import { Snippet, SnippetIndex, Preferences, DatabaseMetadata } from "./types/index";
 import { parsePlaceholders, processOfficialPlaceholders } from "./utils/placeholder";
 import SnippetForm from "./components/SnippetForm";
@@ -30,7 +30,8 @@ const highlightContent = (content: string, query: string, previewUrl?: string) =
   
   // 3. Add preview image if exists
   if (previewUrl) {
-    processed = `<img src="${previewUrl}" alt="Preview" height="150" align="right" />\n\n` + processed;
+    // Use standard Markdown for images to ensure reliable rendering in Raycast
+    processed = `![Preview](${previewUrl})\n\n` + processed;
   }
   
   return processed;
@@ -708,6 +709,27 @@ export default function Command() {
     }
   }, [selectedIds, globalMatches, loadedContents]);
 
+  const handleDelete = async (index: SnippetIndex) => {
+    if (await confirmAlert({
+      title: "Delete Snippet?",
+      message: "This will archive the page in Notion. It can be restored from Notion Trash.",
+      primaryAction: { title: "Archive", style: Alert.ActionStyle.Destructive }
+    })) {
+      try {
+        await showToast({ style: Toast.Style.Animated, title: "Archiving..." });
+        await deleteSnippet(index.id);
+        
+        // Optimistic UI update
+        setRecentSnippets(prev => prev.filter(s => s.id !== index.id));
+        setSearchResults(prev => prev.filter(s => s.id !== index.id));
+        
+        showToast({ style: Toast.Style.Success, title: "Snippet Archived" });
+      } catch (error) {
+        showToast({ style: Toast.Style.Failure, title: "Failed to delete", message: String(error) });
+      }
+    }
+  };
+
   const exportSelectedAndReveal = async () => {
     try {
       // If only 1 item is selected (the focused one), we assume the user wants to export ALL VISIBLE snippets.
@@ -1037,6 +1059,13 @@ export default function Command() {
                     push(<SnippetForm snippet={fullSnippet} onSuccess={refreshSnippets} />);
                   }}
                 />
+                <Action
+                  title="Delete Snippet"
+                  icon={Icon.Trash}
+                  shortcut={{ modifiers: ["ctrl"], key: "x" }}
+                  style={Action.Style.Destructive}
+                  onAction={() => handleDelete(index)}
+                />
               </ActionPanel.Section>
               <ActionPanel.Section title="Sync & Export">
                 <Action
@@ -1250,6 +1279,13 @@ export default function Command() {
                         const fullSnippet = snippetIndexToSnippet(snippet, content);
                         push(<SnippetForm snippet={fullSnippet} onSuccess={refreshSnippets} />);
                       }}
+                    />
+                    <Action
+                      title="Delete Snippet"
+                      icon={Icon.Trash}
+                      shortcut={{ modifiers: ["ctrl"], key: "x" }}
+                      style={Action.Style.Destructive}
+                      onAction={() => handleDelete(snippet)}
                     />
                   </ActionPanel.Section>
                   <ActionPanel.Section title="Sync & Export">
