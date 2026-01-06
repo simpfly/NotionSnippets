@@ -544,6 +544,19 @@ export function snippetIndexToSnippet(
   };
 }
 
+function createChunks(text: string) {
+  const chunks = [];
+  const limit = 2000;
+  for (let i = 0; i < text.length; i += limit) {
+    chunks.push({
+      text: {
+        content: text.substring(i, i + limit),
+      },
+    });
+  }
+  return chunks;
+}
+
 export async function updateSnippet(
   pageId: string,
   payload: {
@@ -588,7 +601,7 @@ export async function updateSnippet(
       title: [{ text: { content: payload.name } }],
     },
     [contentKey]: {
-      rich_text: [{ text: { content: payload.content } }],
+      rich_text: createChunks(payload.content),
     },
   };
 
@@ -730,7 +743,7 @@ export async function createSnippet(payload: {
       title: [{ text: { content: payload.name } }],
     },
     [contentKey]: {
-      rich_text: [{ text: { content: payload.content } }],
+      rich_text: createChunks(payload.content),
     },
   };
 
