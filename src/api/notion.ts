@@ -118,136 +118,49 @@ export async function fetchSnippets(
 
     const dbSnippets = await (async () => {
     try {
-      console.log(`fetchSnippets: [${dbId}] Starting fetch...`);
+      console.log(`fetchSnippets: [${dbId}] fetching recent items...`);
       const snippets: SnippetIndex[] = [];
-      let hasMore = true;
-      let startCursor: string | undefined = undefined;
-      let pageCount = 0;
 
-      // NO LIMITS - fetch all data with retry support
-      const MAX_RETRIES = 3;
-      let retryCount = 0;
+      // INITIAL LOAD: Limited to recent 100 items per DB to prevent OOM
+      const response = await withRetry(() => notion.databases.query({
+        database_id: dbId,
+        page_size: 100, // Hard limit for initial load
+        sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
+      }));
+
+      console.log(`fetchSnippets: [${dbId}] Received ${response.results.length} recent items`);
       
-      while (hasMore) {
-        try {
-          pageCount++;
-          console.log(`fetchSnippets: [${dbId}] Querying page ${pageCount} (cursor: ${startCursor || "start"})`);
-          
-          const response = await withRetry(() => notion.databases.query({
-            database_id: dbId,
-            start_cursor: startCursor,
-            sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
-          }));
-
-          console.log(`fetchSnippets: [${dbId}] Received page ${pageCount} (${response.results.length} results)`);
-          
-          let pageExtracted = 0;
-          let pageSkipped = 0;
-          for (const page of response.results) {
-            if ("properties" in page) {
-              const snippet = extractSnippetIndexFromPage(page, dbId);
-              if (snippet) {
-                snippets.push(snippet);
-                pageExtracted++;
-              } else {
-                pageSkipped++;
-              }
-            }
-          }
-
-          totalFound += response.results.length;
-          totalExtracted += pageExtracted;
-          
-          console.log(`fetchSnippets: [${dbId}] Page ${pageCount}: ${pageExtracted} extracted, ${pageSkipped} skipped. Total extracted: ${totalExtracted}`);
-
-          if (totalExtracted >= STOP_LIMIT) {
-             console.warn(`fetchSnippets: Reached LIMIT of ${STOP_LIMIT}. Stopping fetch for ${dbId}.`);
-             if (onBatch && pageExtracted > 0) {
-               onBatch(snippets.slice(-pageExtracted));
-             }
-             if (onProgress) onProgress(totalExtracted);
-             hasMore = false; // Stop this DB
-             break; 
-          }
-
-          // Batch updates: use very small batches and immediate processing
-          if (onBatch && pageExtracted > 0) {
-            // Send only the new items from this page, not all accumulated items
-            const newItems = snippets.slice(-pageExtracted);
-            // Very small batch size (5) to minimize memory pressure
-            const BATCH_SIZE = 5;
-            for (let i = 0; i < newItems.length; i += BATCH_SIZE) {
-              const batch = newItems.slice(i, i + BATCH_SIZE);
-              onBatch(batch);
-              // Delay between batches to allow processing and GC
-              if (i + BATCH_SIZE < newItems.length) {
-                await new Promise(resolve => setTimeout(resolve, 50));
-              }
-            }
-          }
-          
-          if (onProgress) onProgress(totalExtracted);
-          
-          
-          // Small delay every 50 pages to allow GC
-          if (pageCount % 50 === 0) {
-            await new Promise(resolve => setTimeout(resolve, 100));
-          }
-
-          hasMore = response.has_more;
-          startCursor = response.next_cursor || undefined;
-          retryCount = 0; // Reset retry count on success
-          
-        } catch (error: any) {
-          const errorMessage = error?.message || String(error);
-          const isMemoryError = errorMessage.includes("memory") || errorMessage.includes("heap");
-          
-          console.error(`fetchSnippets: [${dbId}] Error on page ${pageCount}:`, errorMessage);
-          
-          if (isMemoryError && retryCount < MAX_RETRIES && onError) {
-            retryCount++;
-            console.log(`fetchSnippets: [${dbId}] Memory error detected, attempting recovery (attempt ${retryCount}/${MAX_RETRIES})`);
-            
-            // Clear accumulated snippets to free memory
-            const savedCount = snippets.length;
-            snippets.splice(0, snippets.length);
-            
-            // Notify error handler
-            const shouldRetry = await onError(error, dbId, pageCount, startCursor);
-            
-            if (shouldRetry) {
-              console.log(`fetchSnippets: [${dbId}] Retrying from page ${pageCount} (saved ${savedCount} items so far)`);
-              // Wait a bit before retry to allow GC
-              await new Promise(resolve => setTimeout(resolve, 1000));
-              continue; // Retry the same page
-            } else {
-              console.log(`fetchSnippets: [${dbId}] Recovery cancelled by error handler`);
-              break;
-            }
-          } else {
-            // Non-memory error or max retries reached
-            throw error;
+      let pageExtracted = 0;
+      for (const page of response.results) {
+        if ("properties" in page) {
+          const snippet = extractSnippetIndexFromPage(page, dbId);
+          if (snippet) {
+            snippets.push(snippet);
+            pageExtracted++;
           }
         }
       }
-      
-      // No limits - just log progress
-      if (pageCount > 0 && pageCount % 50 === 0) {
-        console.log(`fetchSnippets: [${dbId}] Progress: ${pageCount} pages, ${snippets.length} snippets`);
-      }
 
-      console.log(`fetchSnippets: [${dbId}] Completed. Collected ${snippets.length} total.`);
+      totalFound += response.results.length;
+      totalExtracted += pageExtracted;
+      
+      if (onBatch && pageExtracted > 0) {
+        onBatch(snippets);
+      }
+      if (onProgress) onProgress(totalExtracted);
+      
+      console.log(`fetchSnippets: [${dbId}] Completed. Collected ${snippets.length} recent items.`);
       return snippets;
+
     } catch (error: any) {
       console.error(`fetchSnippets: [${dbId}] Error:`, error);
-      throw error; // Re-throw to let the UI know clearly that sync failed
+      // We don't throw here to allow other databases to proceed even if one fails
+      return []; 
     }
     })();
     
     allSnippets.push(...dbSnippets);
-    totalExtracted += dbSnippets.length;
-    
-    // Clear memory after each database - small delay to allow GC
+    // No loop, so no need for complex break logic
     await new Promise(resolve => setTimeout(resolve, 100));
   }
 
@@ -593,4 +506,101 @@ export async function fetchDatabases(): Promise<DatabaseMetadata[]> {
   const results = await Promise.all(fetchTasks);
   console.log(`fetchDatabases: All complete. Found ${results.length} entries.`);
   return results;
+}
+
+
+export async function searchNotionSnippets(query: string, databaseIds: string[]): Promise<{ results: SnippetIndex[], excludedCount: number }> {
+  const preferences = getPreferenceValues<Preferences>();
+  const notion = new Client({ auth: preferences.notionToken });
+
+  if (!query || query.trim().length === 0) {
+    return { results: [], excludedCount: 0 };
+  }
+
+  // Filter out invalid database IDs
+  const validDbIds = databaseIds.filter(id => id && id.length > 5);
+  // If no DBs configured, we can still search but everything will be "excluded" unless we change logic.
+  // But logical behavior is: strict whitelist.
+  if (validDbIds.length === 0) {
+     console.warn("searchNotionSnippets: No valid database IDs configured.");
+  }
+
+  console.log(`searchNotionSnippets: Searching for "${query}" in ${validDbIds.length} databases`);
+
+  // Force exact phrase matching for CJK queries to avoid fuzzy noise
+  const isCJK = /[\u4e00-\u9fa5]/.test(query);
+  const effectiveQuery = (isCJK && query.length > 1) ? `"${query}"` : query;
+
+  if (effectiveQuery !== query) {
+    console.log(`searchNotionSnippets: Applied exact match for CJK: ${effectiveQuery}`);
+  }
+
+  const results: SnippetIndex[] = [];
+  let excludedCount = 0;
+  let cursor: string | undefined = undefined;
+  let fetchCount = 0;
+
+  try {
+    do {
+      const response = await withRetry(() => notion.search({
+        query: effectiveQuery,
+        sort: undefined, // Use default relevance sorting
+        page_size: 100, // Max page size
+        filter: {
+          property: 'object',
+          value: 'page'
+        },
+        start_cursor: cursor
+      }));
+
+      const pageResults = response.results;
+      console.log(`searchNotionSnippets: Page fetch using cursor ${cursor} returned ${pageResults.length} items. (Has more: ${response.has_more})`);
+
+      for (const page of pageResults) {
+        // 1. Must be a page
+        if (!('properties' in page) || page.object !== 'page') continue;
+        
+        // 2. Must be in one of our target databases
+        const parentDbId = page.parent.type === 'database_id' ? page.parent.database_id : undefined;
+        
+        if (!parentDbId) continue;
+
+        // Check if allowed
+        const dbId = validDbIds.find(id => id.replace(/-/g, '') === parentDbId.replace(/-/g, ''));
+        
+        if (dbId) {
+          const snippet = extractSnippetIndexFromPage(page, dbId);
+          if (snippet) {
+            results.push(snippet);
+          } else {
+            console.warn(`searchNotionSnippets: Failed to extract snippet from page ${page.id}.`);
+          }
+        } else {
+          excludedCount++;
+        }
+      }
+      
+      // Pagination logic
+      if (response.has_more && response.next_cursor) {
+        cursor = response.next_cursor || undefined;
+        fetchCount++;
+      } else {
+        cursor = undefined;
+      }
+      
+      // Stop if we found enough valid matches to show to the user
+      if (results.length >= 20) {
+          console.log("searchNotionSnippets: Found enough matches, stopping search.");
+          break;
+      }
+
+    } while (cursor && fetchCount < 3); // Limit to 3 pages (approx 300 raw items) to keep speed reasonable
+
+    console.log(`searchNotionSnippets: Total Found ${results.length} matches, ${excludedCount} excluded.`);
+    return { results, excludedCount };
+
+  } catch (error) {
+    console.error("searchNotionSnippets Error:", error);
+    return { results: [], excludedCount: 0 };
+  }
 }
