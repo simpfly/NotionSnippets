@@ -871,7 +871,7 @@ export default function Command() {
           </ActionPanel>
         }
       />
-      <List.Section title="Local / Recent Snippets" subtitle={String(localMatches.length)}>
+      <List.Section title="Local" subtitle={String(localMatches.length)}>
         {localMatches.map((index) => {
           // Load content on demand for preview
           const cachedContent = contentCacheRef.current.get(index.id);
@@ -1070,7 +1070,7 @@ export default function Command() {
 
       {/* Global Matches Section */}
       {globalMatches.length > 0 && (
-        <List.Section title="Global Search Results (From Notion Cloud)" subtitle={`${globalMatches.length}`}>
+        <List.Section title="Global" subtitle={`${globalMatches.length}`}>
           {globalMatches.map((snippet) => {
              // Unified UI Logic: Same as Local Matches
              const dbInfo = databases.find(d => d.id === snippet.databaseId);
