@@ -5,6 +5,10 @@
   "description": "Inject snippets from multiple Notion databases with dynamic placeholders.",
   "icon": "icon.png",
   "author": "curiosita",
+  "categories": [
+    "Productivity",
+    "Developer Tools"
+  ],
   "license": "MIT",
   "commands": [
     {
