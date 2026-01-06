@@ -9,6 +9,16 @@ Support **Hybrid Search** (Local Instant + Global Cloud) and **Import to Raycast
 
 <br/>
 
+## 📸 Screenshots
+
+<img src="metadata/screenshot-1.png" width="100%" />
+<img src="metadata/screenshot-2.png" width="100%" />
+<img src="metadata/screenshot-3.png" width="100%" />
+<img src="metadata/screenshot-4.png" width="100%" />
+<img src="metadata/screenshot-5.png" width="100%" />
+
+<br/>
+
 ## ✨ Features
 
 - **🚀 Hybrid Search Engine**:
