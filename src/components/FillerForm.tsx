@@ -1,4 +1,10 @@
-import { Form, ActionPanel, Action, Clipboard, useNavigation } from "@raycast/api";
+import {
+  Form,
+  ActionPanel,
+  Action,
+  Clipboard,
+  useNavigation,
+} from "@raycast/api";
 import { Snippet } from "../types";
 import { replacePlaceholders } from "../utils/placeholder";
 
@@ -26,12 +32,12 @@ export default function FillerForm({ snippet, placeholders, onPaste }: Props) {
         </ActionPanel>
       }
     >
-      <Form.Description 
+      <Form.Description
         title="Preview"
-        text={snippet.content.replace(/(\{?\{{1,2}.*?\}{1,2}\}?)/g, "**`$1`**")} 
+        text={snippet.content.replace(/(\{?\{{1,2}.*?\}{1,2}\}?)/g, "**`$1`**")}
       />
       <Form.Separator />
-      
+
       <Form.Description text={`Filling placeholders for: ${snippet.name}`} />
       {placeholders.map((placeholder) => (
         <Form.TextField

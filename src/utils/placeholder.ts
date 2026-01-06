@@ -7,7 +7,10 @@ export function parsePlaceholders(content: string): string[] {
   return Array.from(new Set(matches.map((m) => m[1].trim())));
 }
 
-export function replacePlaceholders(content: string, variables: Record<string, string>): string {
+export function replacePlaceholders(
+  content: string,
+  variables: Record<string, string>,
+): string {
   let result = content;
   for (const [key, value] of Object.entries(variables)) {
     // Escape for regex and handle both {{key}} and {key}
@@ -18,7 +21,11 @@ export function replacePlaceholders(content: string, variables: Record<string, s
   return result;
 }
 
-export function processOfficialPlaceholders(content: string, clipboardText: string, argument: string = ""): string {
+export function processOfficialPlaceholders(
+  content: string,
+  clipboardText: string,
+  argument: string = "",
+): string {
   let result = content;
   const now = new Date();
 
@@ -27,11 +34,19 @@ export function processOfficialPlaceholders(content: string, clipboardText: stri
   result = result.replace(/{time}/g, () => now.toLocaleTimeString());
   result = result.replace(/{datetime}/g, () => now.toLocaleString());
   result = result.replace(/{year}/g, () => now.getFullYear().toString());
-  result = result.replace(/{month}/g, () => (now.getMonth() + 1).toString().padStart(2, "0"));
-  result = result.replace(/{day}/g, () => now.getDate().toString().padStart(2, "0"));
-  
-  result = result.replace(/{monthName}/g, () => now.toLocaleString("default", { month: "long" }));
-  result = result.replace(/{dayName}/g, () => now.toLocaleString("default", { weekday: "long" }));
+  result = result.replace(/{month}/g, () =>
+    (now.getMonth() + 1).toString().padStart(2, "0"),
+  );
+  result = result.replace(/{day}/g, () =>
+    now.getDate().toString().padStart(2, "0"),
+  );
+
+  result = result.replace(/{monthName}/g, () =>
+    now.toLocaleString("default", { month: "long" }),
+  );
+  result = result.replace(/{dayName}/g, () =>
+    now.toLocaleString("default", { weekday: "long" }),
+  );
 
   // Clipboard placeholder
   result = result.replace(/{clipboard}/g, () => clipboardText);
