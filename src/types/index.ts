@@ -15,6 +15,7 @@ export interface SnippetIndex {
   status?: string;
   statusColor?: string;
   contentLength?: number; // Store length to know if we need to load full content
+  createdAt?: string; // ISO date string from Notion created_time
 }
 
 // Full snippet with complete content

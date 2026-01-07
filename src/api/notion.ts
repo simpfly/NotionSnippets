@@ -530,6 +530,7 @@ function extractSnippetIndexFromPage(
     typeColor,
     status,
     statusColor,
+    createdAt: page.created_time,
   };
 }
 

@@ -66,8 +66,58 @@ const highlightContent = (
 
   // 3. Add preview image if exists
   if (previewUrl) {
+    let safePreviewUrl = previewUrl;
+
+    // A. Attempt to decode GitHub Camo URLs to original source
+    // Camo format: https://camo.githubusercontent.com/<digest>/<hex-encoded-original-url>
+    if (previewUrl.includes("camo.githubusercontent.com")) {
+       try {
+         const parts = previewUrl.split("/");
+         const hexUrl = parts[parts.length - 1]; // The last part is the hex URL
+         if (/^[0-9a-fA-F]+$/.test(hexUrl)) {
+           // Decode Hex to String
+           let decodedUrl = "";
+           for (let i = 0; i < hexUrl.length; i += 2) {
+             decodedUrl += String.fromCharCode(parseInt(hexUrl.substr(i, 2), 16));
+           }
+           // Validate if it looks like a URL
+           if (decodedUrl.startsWith("http")) {
+             safePreviewUrl = decodedUrl;
+           }
+         }
+       } catch (e) {
+         // Fallback to original if decoding fails
+         console.error("Failed to decode Camo URL:", e);
+       }
+    }
+
+    // C. Resize Image (Shrink preview)
+    // We utilize HTML <img> tag (reverted to Markdown for stability).
+    // Raycast Markdown requires an image extension.
+    
+    // B. Ensure URL has an image extension for Raycast Markdown renderer
+    if (!/\.(png|jpg|jpeg|gif|webp|svg|bmp)($|\?|#)/i.test(safePreviewUrl)) {
+       // Check if it's a signed URL (AWS S3, Notion, etc.) where changing query params breaks signature
+       const isSigned = /(Signature|X-Amz-Credential|Key-Pair-Id)/i.test(safePreviewUrl);
+       
+       if (safePreviewUrl.includes("?")) {
+          // If query params exist...
+          if (isSigned) {
+             // ...and it's signed, MUST use fragment to avoid breaking signature
+             safePreviewUrl = safePreviewUrl.endsWith("#.jpg") ? safePreviewUrl : `${safePreviewUrl}#.jpg`;
+          } else {
+             // ...and NOT signed, use '&.jpg' which is more reliable for some parsers than fragment
+             safePreviewUrl = safePreviewUrl.endsWith("&.jpg") ? safePreviewUrl : `${safePreviewUrl}&.jpg`;
+          }
+       } else {
+          // No query params, use '#.jpg' as it's least invasive (fragment)
+          // (Unless we want to force it with ?.jpg, but #.jpg is usually safer for static URLs)
+          safePreviewUrl = safePreviewUrl.endsWith("#.jpg") ? safePreviewUrl : `${safePreviewUrl}#.jpg`;
+       }
+    }
+    
     // Use standard Markdown for images to ensure reliable rendering in Raycast
-    processed = `![Preview](${previewUrl})\n\n` + processed;
+    processed = `![Preview](${safePreviewUrl})\n\n` + processed;
   }
 
   return processed;
@@ -93,6 +143,8 @@ export default function Command() {
     "notion-databases",
     [],
   );
+  // Persisted Sort Order
+  const [sortBy, setSortBy] = useCachedState<string>("sort-by", "usage-desc");
 
   // LRU Cache for full content - reduced to 20 items to prevent memory issues
   const contentCacheRef = useRef<
@@ -730,21 +782,23 @@ export default function Command() {
     // 1. Filter local recent items
     const local = (recentSnippets || [])
       .filter((snippet) => {
-        if (selectedDbId !== "all" && snippet.databaseId !== selectedDbId)
-          return false;
+        // DB Filter
+        if (selectedDbId && selectedDbId !== "all") {
+          if (snippet.databaseId !== selectedDbId) return false;
+        }
 
-        if (!searchText) return true; // Show all recent if no search
-
+        // Search Filter
+        if (!searchText) return true;
         const lowerSearch = searchText.toLowerCase();
-        const lowerName = (snippet.name || "").toLowerCase();
+        const lowerName = snippet.name.toLowerCase();
         const lowerTrigger = (snippet.trigger || "").toLowerCase();
-        const lowerDesc = (snippet.description || "").toLowerCase();
+        // Check content preview as well
         const lowerContent = (snippet.contentPreview || "").toLowerCase();
 
+        if (lowerName.includes(lowerSearch)) return true;
+        if (snippet.trigger && lowerTrigger.includes(lowerSearch)) return true;
         if (
-          lowerName.includes(lowerSearch) ||
-          lowerTrigger.includes(lowerSearch) ||
-          lowerDesc.includes(lowerSearch) ||
+          snippet.contentPreview &&
           lowerContent.includes(lowerSearch)
         )
           return true;
@@ -755,43 +809,77 @@ export default function Command() {
         return false;
       })
       .sort((a, b) => {
-        // ... Sort logic for local (same as before) ...
-        if (searchText && a.trigger === searchText) return -1;
-        if (searchText && b.trigger === searchText) return 1;
-        if (searchText && a.trigger?.toLowerCase() === searchText.toLowerCase())
-          return -1;
-        if (searchText && b.trigger?.toLowerCase() === searchText.toLowerCase())
-          return 1;
+        // 0. Exact Trigger Match (ALWAYS Top)
+        if (searchText) {
+          if (a.trigger === searchText) return -1;
+          if (b.trigger === searchText) return 1;
+          const lowerSearch = searchText.toLowerCase();
+          if (a.trigger?.toLowerCase() === lowerSearch) return -1;
+          if (b.trigger?.toLowerCase() === lowerSearch) return 1;
+        }
 
-        const usageA = a.usageCount || 0;
-        const usageB = b.usageCount || 0;
-        if (usageA !== usageB) return usageB - usageA;
+        // 1. Sort by Selection
+        const [sortKey, sortDir] = sortBy.split("-"); // e.g. "usage-desc"
+        const isAsc = sortDir === "asc";
+        const modifier = isAsc ? 1 : -1;
 
-        const dateA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
-        const dateB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
-        if (dateA !== dateB) return dateB - dateA;
+        if (sortKey === "created") {
+          // Creation Date
+          const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+          const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+          if (dateA !== dateB) return (dateA - dateB) * modifier;
+        } else if (sortKey === "last_used") {
+          // Recently Used
+          const dateA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
+          const dateB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
+          if (dateA !== dateB) return (dateA - dateB) * modifier;
+        } else {
+          // Most Used (Default: usage)
+          const usageA = a.usageCount || 0;
+          const usageB = b.usageCount || 0;
+          if (usageA !== usageB) return (usageA - usageB) * modifier;
 
+          // Tie-break with Last Used (always desc for tie-break unless specific logic needed)
+          // Actually if we are strictly Ascending usage, tie break should probably follow logic or be stable.
+          // Let's keep tie-break simple: Last Used Descending
+          const dateA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
+          const dateB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
+          if (dateA !== dateB) return dateB - dateA;
+        }
+
+        // 2. Tie-break with Name
         return a.name.localeCompare(b.name);
       });
 
     // 2. Process Global Results (Dedup against local)
-    let global: SnippetIndex[] = [];
-    if (searchResults.length > 0 && searchText) {
-      const existingIds = new Set(local.map((s) => s.id));
-      // Filter out items already in local results to avoid duplicates
-      const newItems = searchResults.filter((s) => !existingIds.has(s.id));
+    const global = (searchResults || [])
+      // Filter out items already in local
+      .filter((s) => !local.find((l) => l.id === s.id))
+      .sort((a, b) => {
+         // Apply same sort logic to global matches?
+         // Yes, consisteny is good.
+         const [sortKey, sortDir] = sortBy.split("-");
+         const isAsc = sortDir === "asc";
+         const modifier = isAsc ? 1 : -1;
 
-      if (selectedDbId !== "all") {
-        global = newItems.filter((s) => s.databaseId === selectedDbId);
-      } else {
-        global = newItems;
-      }
-      // Sort global results by last edited (usually returned by API, but ensure consistency)
-      // Notion Search API already returns sorted by relevance/last_edited usually.
-    }
+         if (sortKey === "created") {
+            const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+            const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+            if (dateA !== dateB) return (dateA - dateB) * modifier;
+         } else if (sortKey === "last_used") {
+            const dateA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
+            const dateB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
+            if (dateA !== dateB) return (dateA - dateB) * modifier;
+         } else {
+             const usageA = a.usageCount || 0;
+             const usageB = b.usageCount || 0;
+             if (usageA !== usageB) return (usageA - usageB) * modifier;
+         }
+         return a.name.localeCompare(b.name);
+      });
 
     return { localMatches: local, globalMatches: global };
-  }, [recentSnippets, searchResults, searchText, selectedDbId]);
+  }, [recentSnippets, searchResults, searchText, selectedDbId, sortBy]);
 
   // EFFECT: Auto-fetch full content for selected global results (Reveal hidden terms)
   useEffect(() => {
@@ -942,9 +1030,12 @@ export default function Command() {
   return (
     <List
       isLoading={isLoading || isGlobalSearching}
-      searchBarPlaceholder={placeholder}
+      searchBarPlaceholder={`Search in ${selectedDbId === "all" ? "All" : databases.find((d) => d.id === selectedDbId)?.title || "Database"}...`}
       isShowingDetail={true}
-      onSearchTextChange={setSearchText}
+      throttle={true}
+      selectedItemId={selectedIds[0]} // Optional: Control first item if needed, but safer to let it be uncontrolled or map from IDs? 
+      // Actually, if I want to support multi-select via state tracking, I need to know how Raycast behaves.
+      // Reverting to the previous logic which seemed to work for them:
       onSelectionChange={(ids) => {
         if (!ids) {
           setSelectedIds([]);
@@ -956,23 +1047,65 @@ export default function Command() {
       }}
       searchBarAccessory={
         <List.Dropdown
-          tooltip="Filter by Database"
-          storeValue={true}
-          onChange={(newValue) => setSelectedDbId(newValue)}
+          tooltip="Filter & Sort"
+          storeValue={false} // Manage state manually to show correct selection
+          onChange={(newValue) => {
+             if (newValue.startsWith("sort_")) {
+                setSortBy(newValue.replace("sort_", ""));
+             } else if (newValue.startsWith("db_")) {
+                setSelectedDbId(newValue.replace("db_", ""));
+             } else if (newValue === "db_all") {
+                setSelectedDbId("all");
+             }
+          }}
+          value={`db_${selectedDbId}`} 
         >
-          <List.Dropdown.Section title="Databases">
+          <List.Dropdown.Section title="Filter Database">
             <List.Dropdown.Item
               title={`All Snippets (${recentSnippets.length})`}
-              value="all"
+              value="db_all"
+              icon={selectedDbId === "all" ? (sortBy.includes("created") ? Icon.Calendar : sortBy.includes("last_used") ? Icon.Clock : Icon.BarChart) : undefined}
             />
             {databases.map((db) => (
               <List.Dropdown.Item
                 key={`${db.id}-${dbCounts[db.id] || 0}`}
                 title={`${db.title} (${dbCounts[db.id] || 0})`}
-                value={db.id}
-                icon={db.icon}
+                value={`db_${db.id}`}
+                icon={selectedDbId === db.id ? (sortBy.includes("created") ? Icon.Calendar : sortBy.includes("last_used") ? Icon.Clock : Icon.BarChart) : db.icon}
               />
             ))}
+          </List.Dropdown.Section>
+          <List.Dropdown.Section title="Sort Order">
+             <List.Dropdown.Item 
+               title="Most Used" 
+               value="sort_usage-desc" 
+               icon={sortBy === "usage-desc" ? Icon.CheckCircle : Icon.BarChart} 
+             />
+             <List.Dropdown.Item 
+               title="Least Used" 
+               value="sort_usage-asc" 
+               icon={sortBy === "usage-asc" ? Icon.CheckCircle : Icon.BarChart} 
+             />
+             <List.Dropdown.Item 
+               title="Recently Used" 
+               value="sort_last_used-desc" 
+               icon={sortBy === "last_used-desc" ? Icon.CheckCircle : Icon.Clock} 
+             />
+             <List.Dropdown.Item 
+               title="Oldest Used" 
+               value="sort_last_used-asc" 
+               icon={sortBy === "last_used-asc" ? Icon.CheckCircle : Icon.Clock} 
+             />
+             <List.Dropdown.Item 
+               title="Newest Created" 
+               value="sort_created-desc" 
+               icon={sortBy === "created-desc" ? Icon.CheckCircle : Icon.Calendar} 
+             />
+             <List.Dropdown.Item 
+               title="Oldest Created" 
+               value="sort_created-asc" 
+               icon={sortBy === "created-asc" ? Icon.CheckCircle : Icon.Calendar} 
+             />
           </List.Dropdown.Section>
         </List.Dropdown>
       }
@@ -1006,6 +1139,23 @@ export default function Command() {
                 );
               }}
             />
+            <ActionPanel.Section title="Sort Options">
+              <Action
+                title="Sort by Most Used"
+                icon={sortBy === "usage" ? Icon.CheckCircle : Icon.Circle}
+                onAction={() => setSortBy("usage")}
+              />
+              <Action
+                title="Sort by Recently Used"
+                icon={sortBy === "last-used" ? Icon.CheckCircle : Icon.Circle}
+                onAction={() => setSortBy("last-used")}
+              />
+              <Action
+                title="Sort by Created Date"
+                icon={sortBy === "created" ? Icon.CheckCircle : Icon.Circle}
+                onAction={() => setSortBy("created")}
+              />
+            </ActionPanel.Section>
             <Action
               title="Create New Snippet"
               icon={Icon.Plus}
@@ -1294,6 +1444,23 @@ export default function Command() {
                           title: "Content copied",
                         });
                       }}
+                    />
+                  </ActionPanel.Section>
+                  <ActionPanel.Section title="Sort Options">
+                    <Action
+                      title="Sort by Most Used"
+                      icon={sortBy === "usage" ? Icon.CheckCircle : Icon.Circle}
+                      onAction={() => setSortBy("usage")}
+                    />
+                    <Action
+                      title="Sort by Recently Used"
+                      icon={sortBy === "last-used" ? Icon.CheckCircle : Icon.Circle}
+                      onAction={() => setSortBy("last-used")}
+                    />
+                    <Action
+                      title="Sort by Created Date"
+                      icon={sortBy === "created" ? Icon.CheckCircle : Icon.Circle}
+                      onAction={() => setSortBy("created")}
                     />
                   </ActionPanel.Section>
                 </ActionPanel>
@@ -1593,6 +1760,23 @@ export default function Command() {
                             title: "Content copied",
                           });
                         }}
+                      />
+                    </ActionPanel.Section>
+                    <ActionPanel.Section title="Sort Options">
+                      <Action
+                        title="Sort by Most Used"
+                        icon={sortBy === "usage" ? Icon.CheckCircle : Icon.Circle}
+                        onAction={() => setSortBy("usage")}
+                      />
+                      <Action
+                        title="Sort by Recently Used"
+                        icon={sortBy === "last-used" ? Icon.CheckCircle : Icon.Circle}
+                        onAction={() => setSortBy("last-used")}
+                      />
+                      <Action
+                        title="Sort by Created Date"
+                        icon={sortBy === "created" ? Icon.CheckCircle : Icon.Circle}
+                        onAction={() => setSortBy("created")}
                       />
                     </ActionPanel.Section>
                   </ActionPanel>
