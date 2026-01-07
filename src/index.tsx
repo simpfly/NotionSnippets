@@ -1199,7 +1199,7 @@ export default function Command() {
             index.contentLength &&
             index.contentLength > 500
           ) {
-            highlightedContent += "\n\n*[Click to load full content]*";
+            // highlightedContent += "\n\n*[Click to load full content]*";
           }
 
           // Find db info efficiently
