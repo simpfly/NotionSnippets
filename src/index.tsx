@@ -759,20 +759,34 @@ export default function Command() {
       const dbIds = (preferences.databaseIds || "")
         .replace(/[[\]"']/g, "")
         .split(/[,\s]+/);
-      const { results, excludedCount } = await searchNotionSnippets(
-        searchText,
-        dbIds,
-      );
 
-      // Ensure UI feedback is visible for at least 800ms
-      const elapsed = Date.now() - startTime;
-      if (elapsed < 800) {
-        await new Promise((resolve) => setTimeout(resolve, 800 - elapsed));
+      try {
+        const { results, excludedCount } = await searchNotionSnippets(
+          searchText,
+          dbIds,
+        );
+
+        // Ensure UI feedback is visible for at least 800ms
+        const elapsed = Date.now() - startTime;
+        if (elapsed < 800) {
+          await new Promise((resolve) => setTimeout(resolve, 800 - elapsed));
+        }
+
+        setSearchResults(results);
+        setExcludedResultCount(excludedCount);
+      } catch (error) {
+        console.error("Global search failed:", error);
+        showToast({
+          style: Toast.Style.Failure,
+          title: "Global Search Failed",
+          message:
+            "Check your API Key permissions. " +
+            (error instanceof Error ? error.message : String(error)),
+        });
+        setSearchResults([]);
+      } finally {
+        setIsGlobalSearching(false);
       }
-
-      setSearchResults(results);
-      setExcludedResultCount(excludedCount);
-      setIsGlobalSearching(false);
     }, 500);
 
     return () => clearTimeout(handler);
@@ -1031,6 +1045,7 @@ export default function Command() {
     <List
       isLoading={isLoading || isGlobalSearching}
       searchBarPlaceholder={`Search in ${selectedDbId === "all" ? "All" : databases.find((d) => d.id === selectedDbId)?.title || "Database"}...`}
+      onSearchTextChange={setSearchText}
       isShowingDetail={true}
       throttle={true}
       selectedItemId={selectedIds[0]} // Optional: Control first item if needed, but safer to let it be uncontrolled or map from IDs? 

@@ -914,6 +914,6 @@ export async function searchNotionSnippets(
     return { results, excludedCount };
   } catch (error) {
     console.error("searchNotionSnippets Error:", error);
-    return { results: [], excludedCount: 0 };
+    throw error;
   }
 }
