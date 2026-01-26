@@ -14,6 +14,7 @@ import {
   Color,
   closeMainWindow,
   openCommandPreferences,
+  showInFinder,
 } from "@raycast/api";
 import { useCachedState } from "@raycast/utils";
 import { useEffect, useState, useMemo, useRef } from "react";
@@ -41,7 +42,6 @@ import FillerForm from "./components/FillerForm";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { exec } from "child_process";
 
 // Helper to highlight content
 const highlightContent = (
@@ -71,51 +71,61 @@ const highlightContent = (
     // A. Attempt to decode GitHub Camo URLs to original source
     // Camo format: https://camo.githubusercontent.com/<digest>/<hex-encoded-original-url>
     if (previewUrl.includes("camo.githubusercontent.com")) {
-       try {
-         const parts = previewUrl.split("/");
-         const hexUrl = parts[parts.length - 1]; // The last part is the hex URL
-         if (/^[0-9a-fA-F]+$/.test(hexUrl)) {
-           // Decode Hex to String
-           let decodedUrl = "";
-           for (let i = 0; i < hexUrl.length; i += 2) {
-             decodedUrl += String.fromCharCode(parseInt(hexUrl.substr(i, 2), 16));
-           }
-           // Validate if it looks like a URL
-           if (decodedUrl.startsWith("http")) {
-             safePreviewUrl = decodedUrl;
-           }
-         }
-       } catch (e) {
-         // Fallback to original if decoding fails
-         console.error("Failed to decode Camo URL:", e);
-       }
+      try {
+        const parts = previewUrl.split("/");
+        const hexUrl = parts[parts.length - 1]; // The last part is the hex URL
+        if (/^[0-9a-fA-F]+$/.test(hexUrl)) {
+          // Decode Hex to String
+          let decodedUrl = "";
+          for (let i = 0; i < hexUrl.length; i += 2) {
+            decodedUrl += String.fromCharCode(
+              parseInt(hexUrl.substr(i, 2), 16),
+            );
+          }
+          // Validate if it looks like a URL
+          if (decodedUrl.startsWith("http")) {
+            safePreviewUrl = decodedUrl;
+          }
+        }
+      } catch (e) {
+        // Fallback to original if decoding fails
+        console.error("Failed to decode Camo URL:", e);
+      }
     }
 
     // C. Resize Image (Shrink preview)
     // We utilize HTML <img> tag (reverted to Markdown for stability).
     // Raycast Markdown requires an image extension.
-    
+
     // B. Ensure URL has an image extension for Raycast Markdown renderer
     if (!/\.(png|jpg|jpeg|gif|webp|svg|bmp)($|\?|#)/i.test(safePreviewUrl)) {
-       // Check if it's a signed URL (AWS S3, Notion, etc.) where changing query params breaks signature
-       const isSigned = /(Signature|X-Amz-Credential|Key-Pair-Id)/i.test(safePreviewUrl);
-       
-       if (safePreviewUrl.includes("?")) {
-          // If query params exist...
-          if (isSigned) {
-             // ...and it's signed, MUST use fragment to avoid breaking signature
-             safePreviewUrl = safePreviewUrl.endsWith("#.jpg") ? safePreviewUrl : `${safePreviewUrl}#.jpg`;
-          } else {
-             // ...and NOT signed, use '&.jpg' which is more reliable for some parsers than fragment
-             safePreviewUrl = safePreviewUrl.endsWith("&.jpg") ? safePreviewUrl : `${safePreviewUrl}&.jpg`;
-          }
-       } else {
-          // No query params, use '#.jpg' as it's least invasive (fragment)
-          // (Unless we want to force it with ?.jpg, but #.jpg is usually safer for static URLs)
-          safePreviewUrl = safePreviewUrl.endsWith("#.jpg") ? safePreviewUrl : `${safePreviewUrl}#.jpg`;
-       }
+      // Check if it's a signed URL (AWS S3, Notion, etc.) where changing query params breaks signature
+      const isSigned = /(Signature|X-Amz-Credential|Key-Pair-Id)/i.test(
+        safePreviewUrl,
+      );
+
+      if (safePreviewUrl.includes("?")) {
+        // If query params exist...
+        if (isSigned) {
+          // ...and it's signed, MUST use fragment to avoid breaking signature
+          safePreviewUrl = safePreviewUrl.endsWith("#.jpg")
+            ? safePreviewUrl
+            : `${safePreviewUrl}#.jpg`;
+        } else {
+          // ...and NOT signed, use '&.jpg' which is more reliable for some parsers than fragment
+          safePreviewUrl = safePreviewUrl.endsWith("&.jpg")
+            ? safePreviewUrl
+            : `${safePreviewUrl}&.jpg`;
+        }
+      } else {
+        // No query params, use '#.jpg' as it's least invasive (fragment)
+        // (Unless we want to force it with ?.jpg, but #.jpg is usually safer for static URLs)
+        safePreviewUrl = safePreviewUrl.endsWith("#.jpg")
+          ? safePreviewUrl
+          : `${safePreviewUrl}#.jpg`;
+      }
     }
-    
+
     // Use standard Markdown for images to ensure reliable rendering in Raycast
     processed = `![Preview](${safePreviewUrl})\n\n` + processed;
   }
@@ -811,10 +821,7 @@ export default function Command() {
 
         if (lowerName.includes(lowerSearch)) return true;
         if (snippet.trigger && lowerTrigger.includes(lowerSearch)) return true;
-        if (
-          snippet.contentPreview &&
-          lowerContent.includes(lowerSearch)
-        )
+        if (snippet.contentPreview && lowerContent.includes(lowerSearch))
           return true;
 
         if (snippet.trigger && lowerSearch.startsWith(lowerTrigger + " "))
@@ -870,26 +877,26 @@ export default function Command() {
       // Filter out items already in local
       .filter((s) => !local.find((l) => l.id === s.id))
       .sort((a, b) => {
-         // Apply same sort logic to global matches?
-         // Yes, consisteny is good.
-         const [sortKey, sortDir] = sortBy.split("-");
-         const isAsc = sortDir === "asc";
-         const modifier = isAsc ? 1 : -1;
+        // Apply same sort logic to global matches?
+        // Yes, consisteny is good.
+        const [sortKey, sortDir] = sortBy.split("-");
+        const isAsc = sortDir === "asc";
+        const modifier = isAsc ? 1 : -1;
 
-         if (sortKey === "created") {
-            const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-            const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-            if (dateA !== dateB) return (dateA - dateB) * modifier;
-         } else if (sortKey === "last_used") {
-            const dateA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
-            const dateB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
-            if (dateA !== dateB) return (dateA - dateB) * modifier;
-         } else {
-             const usageA = a.usageCount || 0;
-             const usageB = b.usageCount || 0;
-             if (usageA !== usageB) return (usageA - usageB) * modifier;
-         }
-         return a.name.localeCompare(b.name);
+        if (sortKey === "created") {
+          const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+          const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+          if (dateA !== dateB) return (dateA - dateB) * modifier;
+        } else if (sortKey === "last_used") {
+          const dateA = a.lastUsed ? new Date(a.lastUsed).getTime() : 0;
+          const dateB = b.lastUsed ? new Date(b.lastUsed).getTime() : 0;
+          if (dateA !== dateB) return (dateA - dateB) * modifier;
+        } else {
+          const usageA = a.usageCount || 0;
+          const usageB = b.usageCount || 0;
+          if (usageA !== usageB) return (usageA - usageB) * modifier;
+        }
+        return a.name.localeCompare(b.name);
       });
 
     return { localMatches: local, globalMatches: global };
@@ -993,10 +1000,7 @@ export default function Command() {
       const exportPath = path.join(os.homedir(), "Downloads", fileName);
       fs.writeFileSync(exportPath, JSON.stringify(raycastSnippets, null, 2));
 
-      const script = `tell application "Finder" to reveal posix file "${exportPath}"
-      tell application "Finder" to activate`;
-
-      exec(`osascript -e '${script}'`);
+      await showInFinder(exportPath);
 
       await showToast({
         style: Toast.Style.Success,
@@ -1034,13 +1038,6 @@ export default function Command() {
     return counts;
   }, [recentSnippets, searchResults, searchText]);
 
-  const placeholder = useMemo(() => {
-    if (isLoading && recentSnippets.length === 0)
-      return "Connecting to Notion...";
-    if (isGlobalSearching) return "Searching Notion Global Index...";
-    return "Search snippets...";
-  }, [isLoading, recentSnippets.length, isGlobalSearching]);
-
   return (
     <List
       isLoading={isLoading || isGlobalSearching}
@@ -1048,7 +1045,7 @@ export default function Command() {
       onSearchTextChange={setSearchText}
       isShowingDetail={true}
       throttle={true}
-      selectedItemId={selectedIds[0]} // Optional: Control first item if needed, but safer to let it be uncontrolled or map from IDs? 
+      selectedItemId={selectedIds[0]} // Optional: Control first item if needed, but safer to let it be uncontrolled or map from IDs?
       // Actually, if I want to support multi-select via state tracking, I need to know how Raycast behaves.
       // Reverting to the previous logic which seemed to work for them:
       onSelectionChange={(ids) => {
@@ -1065,62 +1062,80 @@ export default function Command() {
           tooltip="Filter & Sort"
           storeValue={false} // Manage state manually to show correct selection
           onChange={(newValue) => {
-             if (newValue.startsWith("sort_")) {
-                setSortBy(newValue.replace("sort_", ""));
-             } else if (newValue.startsWith("db_")) {
-                setSelectedDbId(newValue.replace("db_", ""));
-             } else if (newValue === "db_all") {
-                setSelectedDbId("all");
-             }
+            if (newValue.startsWith("sort_")) {
+              setSortBy(newValue.replace("sort_", ""));
+            } else if (newValue.startsWith("db_")) {
+              setSelectedDbId(newValue.replace("db_", ""));
+            } else if (newValue === "db_all") {
+              setSelectedDbId("all");
+            }
           }}
-          value={`db_${selectedDbId}`} 
+          value={`db_${selectedDbId}`}
         >
           <List.Dropdown.Section title="Filter Database">
             <List.Dropdown.Item
               title={`All Snippets (${recentSnippets.length})`}
               value="db_all"
-              icon={selectedDbId === "all" ? (sortBy.includes("created") ? Icon.Calendar : sortBy.includes("last_used") ? Icon.Clock : Icon.BarChart) : undefined}
+              icon={
+                selectedDbId === "all"
+                  ? sortBy.includes("created")
+                    ? Icon.Calendar
+                    : sortBy.includes("last_used")
+                      ? Icon.Clock
+                      : Icon.BarChart
+                  : undefined
+              }
             />
             {databases.map((db) => (
               <List.Dropdown.Item
                 key={`${db.id}-${dbCounts[db.id] || 0}`}
                 title={`${db.title} (${dbCounts[db.id] || 0})`}
                 value={`db_${db.id}`}
-                icon={selectedDbId === db.id ? (sortBy.includes("created") ? Icon.Calendar : sortBy.includes("last_used") ? Icon.Clock : Icon.BarChart) : db.icon}
+                icon={
+                  selectedDbId === db.id
+                    ? sortBy.includes("created")
+                      ? Icon.Calendar
+                      : sortBy.includes("last_used")
+                        ? Icon.Clock
+                        : Icon.BarChart
+                    : db.icon
+                }
               />
             ))}
           </List.Dropdown.Section>
           <List.Dropdown.Section title="Sort Order">
-             <List.Dropdown.Item 
-               title="Most Used" 
-               value="sort_usage-desc" 
-               icon={sortBy === "usage-desc" ? Icon.CheckCircle : Icon.BarChart} 
-             />
-             <List.Dropdown.Item 
-               title="Least Used" 
-               value="sort_usage-asc" 
-               icon={sortBy === "usage-asc" ? Icon.CheckCircle : Icon.BarChart} 
-             />
-             <List.Dropdown.Item 
-               title="Recently Used" 
-               value="sort_last_used-desc" 
-               icon={sortBy === "last_used-desc" ? Icon.CheckCircle : Icon.Clock} 
-             />
-             <List.Dropdown.Item 
-               title="Oldest Used" 
-               value="sort_last_used-asc" 
-               icon={sortBy === "last_used-asc" ? Icon.CheckCircle : Icon.Clock} 
-             />
-             <List.Dropdown.Item 
-               title="Newest Created" 
-               value="sort_created-desc" 
-               icon={sortBy === "created-desc" ? Icon.CheckCircle : Icon.Calendar} 
-             />
-             <List.Dropdown.Item 
-               title="Oldest Created" 
-               value="sort_created-asc" 
-               icon={sortBy === "created-asc" ? Icon.CheckCircle : Icon.Calendar} 
-             />
+            <List.Dropdown.Item
+              title="Most Used"
+              value="sort_usage-desc"
+              icon={sortBy === "usage-desc" ? Icon.CheckCircle : Icon.BarChart}
+            />
+            <List.Dropdown.Item
+              title="Least Used"
+              value="sort_usage-asc"
+              icon={sortBy === "usage-asc" ? Icon.CheckCircle : Icon.BarChart}
+            />
+            <List.Dropdown.Item
+              title="Recently Used"
+              value="sort_last_used-desc"
+              icon={sortBy === "last_used-desc" ? Icon.CheckCircle : Icon.Clock}
+            />
+            <List.Dropdown.Item
+              title="Oldest Used"
+              value="sort_last_used-asc"
+              icon={sortBy === "last_used-asc" ? Icon.CheckCircle : Icon.Clock}
+            />
+            <List.Dropdown.Item
+              title="Newest Created"
+              value="sort_created-desc"
+              icon={
+                sortBy === "created-desc" ? Icon.CheckCircle : Icon.Calendar
+              }
+            />
+            <List.Dropdown.Item
+              title="Oldest Created"
+              value="sort_created-asc"
+              icon={sortBy === "created-asc" ? Icon.CheckCircle : Icon.Calendar}
+            />
           </List.Dropdown.Section>
         </List.Dropdown>
       }
@@ -1202,7 +1217,7 @@ export default function Command() {
           }
 
           // Use helper for highlighting
-          let highlightedContent = highlightContent(
+          const highlightedContent = highlightContent(
             displayContent,
             searchText,
             index.preview,
@@ -1469,12 +1484,16 @@ export default function Command() {
                     />
                     <Action
                       title="Sort by Recently Used"
-                      icon={sortBy === "last-used" ? Icon.CheckCircle : Icon.Circle}
+                      icon={
+                        sortBy === "last-used" ? Icon.CheckCircle : Icon.Circle
+                      }
                       onAction={() => setSortBy("last-used")}
                     />
                     <Action
                       title="Sort by Created Date"
-                      icon={sortBy === "created" ? Icon.CheckCircle : Icon.Circle}
+                      icon={
+                        sortBy === "created" ? Icon.CheckCircle : Icon.Circle
+                      }
                       onAction={() => setSortBy("created")}
                     />
                   </ActionPanel.Section>
@@ -1780,17 +1799,25 @@ export default function Command() {
                     <ActionPanel.Section title="Sort Options">
                       <Action
                         title="Sort by Most Used"
-                        icon={sortBy === "usage" ? Icon.CheckCircle : Icon.Circle}
+                        icon={
+                          sortBy === "usage" ? Icon.CheckCircle : Icon.Circle
+                        }
                         onAction={() => setSortBy("usage")}
                       />
                       <Action
                         title="Sort by Recently Used"
-                        icon={sortBy === "last-used" ? Icon.CheckCircle : Icon.Circle}
+                        icon={
+                          sortBy === "last-used"
+                            ? Icon.CheckCircle
+                            : Icon.Circle
+                        }
                         onAction={() => setSortBy("last-used")}
                       />
                       <Action
                         title="Sort by Created Date"
-                        icon={sortBy === "created" ? Icon.CheckCircle : Icon.Circle}
+                        icon={
+                          sortBy === "created" ? Icon.CheckCircle : Icon.Circle
+                        }
                         onAction={() => setSortBy("created")}
                       />
                     </ActionPanel.Section>

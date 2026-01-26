@@ -1,6 +1,6 @@
 # Changelog
 
-## [Initial Version] - 2026-01-06
+## [Initial Version] - {PR_MERGE_DATE}
 
 - Initial release
 - Hybrid Search (Global + Local)
