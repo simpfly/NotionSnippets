@@ -15,6 +15,6 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*"],
+  "include": ["raycast-env.d.ts", "src/**/*"],
   "exclude": ["node_modules", "dist"]
 }

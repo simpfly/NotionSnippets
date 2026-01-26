@@ -28,9 +28,3 @@ export interface DatabaseMetadata {
   title: string;
   icon?: string;
 }
-
-export interface Preferences {
-  notionToken: string;
-  databaseIds: string;
-  showMetadata: boolean;
-}

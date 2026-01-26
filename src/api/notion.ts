@@ -1,11 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { Client } from "@notionhq/client";
-import {
-  Preferences,
-  Snippet,
-  SnippetIndex,
-  DatabaseMetadata,
-} from "../types/index";
+import { Snippet, SnippetIndex, DatabaseMetadata } from "../types/index";
 import { getPreferenceValues, Color } from "@raycast/api";
 
 function mapNotionColor(notionColor: string): string | undefined {
@@ -158,7 +153,11 @@ export async function fetchSnippets(
     .replace(/[[\]"']/g, "")
     .split(/[,\s]+/);
   const dbIds = Array.from(
-    new Set(dbIdsRaw.map((id) => id.trim()).filter((id) => id.length > 5)),
+    new Set(
+      dbIdsRaw
+        .map((id: string) => id.trim())
+        .filter((id: string) => id.length > 5),
+    ),
   );
 
   const STOP_LIMIT = 1000; // Hard limit to prevent OOM
@@ -771,14 +770,18 @@ export async function fetchDatabases(): Promise<DatabaseMetadata[]> {
     .replace(/[[\]"']/g, "")
     .split(/[,\s]+/);
   const dbIds = Array.from(
-    new Set(dbIdsRaw.map((id) => id.trim()).filter((id) => id.length > 5)),
+    new Set(
+      dbIdsRaw
+        .map((id: string) => id.trim())
+        .filter((id: string) => id.length > 5),
+    ),
   );
 
   console.log(
     `fetchDatabases: Fetching metadata for ${dbIds.length} unique databases`,
   );
 
-  const fetchTasks = dbIds.map(async (id) => {
+  const fetchTasks = dbIds.map(async (id: string) => {
     try {
       console.log(`fetchDatabases: [${id}] Retrieving metadata...`);
       const res = await withRetry(() =>

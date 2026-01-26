@@ -27,12 +27,7 @@ import {
   searchNotionSnippets,
   deleteSnippet,
 } from "./api/notion";
-import {
-  Snippet,
-  SnippetIndex,
-  Preferences,
-  DatabaseMetadata,
-} from "./types/index";
+import { Snippet, SnippetIndex, DatabaseMetadata } from "./types/index";
 import {
   parsePlaceholders,
   processOfficialPlaceholders,
