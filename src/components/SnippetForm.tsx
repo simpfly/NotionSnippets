@@ -101,7 +101,7 @@ export default function SnippetForm({ snippet, onSuccess }: Props) {
           databaseId: isEdit ? snippet!.databaseId : values.dbId,
           // For updates, preserve existing metadata
           usageCount: isEdit ? snippet!.usageCount : 0,
-          lastUsed: isEdit ? snippet!.lastUsed : new Date(),
+          lastUsed: isEdit ? snippet!.lastUsed : new Date().toISOString(),
         };
         onSuccess(optimisticSnippet);
       }

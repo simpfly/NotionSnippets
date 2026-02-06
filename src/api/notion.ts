@@ -76,8 +76,6 @@ export async function fetchSnippetContent(pageId: string): Promise<string> {
       "text",
       "snippet content",
       "value",
-      "内容",
-      "正文",
       "snippet text",
       "url",
       "website",
@@ -261,8 +259,6 @@ function extractSnippetIndexFromPage(
     "title",
     "label",
     "snippet name",
-    "标题",
-    "名称",
     "snippet title",
     "task",
     "subject",
@@ -273,8 +269,6 @@ function extractSnippetIndexFromPage(
     "text",
     "snippet content",
     "value",
-    "内容",
-    "正文",
     "snippet text",
     "url",
     "website",
@@ -291,8 +285,6 @@ function extractSnippetIndexFromPage(
     "shortcut",
     "key",
     "keyword",
-    "触发词",
-    "快捷键",
     "snippet trigger",
     "trigger word",
     "alias",
@@ -403,7 +395,7 @@ function extractSnippetIndexFromPage(
     typeColor = mapNotionColor(typeProp.multi_select[0].color);
   }
 
-  const statusProp = findProp(["status", "state", "stage", "状态", "阶段"]);
+  const statusProp = findProp(["status", "state", "stage"]);
   if (statusProp?.status) {
     status = statusProp.status.name;
     statusColor = mapNotionColor(statusProp.status.color);
@@ -647,29 +639,11 @@ export async function updateSnippetUsage(
     };
 
     const usageKey = findPropName(
-      [
-        "usage count",
-        "usage",
-        "count",
-        "times used",
-        "copy count",
-        "使用次数",
-        "使用",
-        "次数",
-      ],
+      ["usage count", "usage", "count", "times used", "copy count"],
       "number",
     );
     const lastUsedKey = findPropName(
-      [
-        "last used",
-        "last used at",
-        "recent",
-        "time",
-        "date",
-        "最后使用",
-        "时间",
-        "日期",
-      ],
+      ["last used", "last used at", "recent", "time", "date"],
       "date",
     );
 

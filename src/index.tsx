@@ -798,6 +798,8 @@ export default function Command() {
   }, [searchText]);
 
   const { localMatches, globalMatches } = useMemo(() => {
+    const normalizedSearchText = (searchText || "").trim().toLowerCase();
+
     // 1. Filter local recent items
     const local = (recentSnippets || [])
       .filter((snippet) => {
@@ -807,19 +809,18 @@ export default function Command() {
         }
 
         // Search Filter
-        if (!searchText) return true;
-        const lowerSearch = searchText.toLowerCase();
+        if (!normalizedSearchText) return true;
         const lowerName = snippet.name.toLowerCase();
         const lowerTrigger = (snippet.trigger || "").toLowerCase();
-        // Check content preview as well
-        const lowerContent = (snippet.contentPreview || "").toLowerCase();
 
-        if (lowerName.includes(lowerSearch)) return true;
-        if (snippet.trigger && lowerTrigger.includes(lowerSearch)) return true;
-        if (snippet.contentPreview && lowerContent.includes(lowerSearch))
+        if (lowerName.includes(normalizedSearchText)) return true;
+        if (snippet.trigger && lowerTrigger.includes(normalizedSearchText))
           return true;
 
-        if (snippet.trigger && lowerSearch.startsWith(lowerTrigger + " "))
+        if (
+          snippet.trigger &&
+          normalizedSearchText.startsWith(lowerTrigger + " ")
+        )
           return true;
 
         return false;
@@ -867,10 +868,32 @@ export default function Command() {
         return a.name.localeCompare(b.name);
       });
 
-    // 2. Process Global Results (Dedup against local)
+    // 2. Process Global Results (Dedup against local cache)
     const global = (searchResults || [])
-      // Filter out items already in local
-      .filter((s) => !local.find((l) => l.id === s.id))
+      .filter((s) => {
+        // 1. DB Filter (Missing in previous version!)
+        if (selectedDbId && selectedDbId !== "all") {
+          if (s.databaseId !== selectedDbId) return false;
+        }
+
+        // 2. Dedup against ALL recent snippets, not just filtered ones
+        const isDuplicate = !!recentSnippets.find((l) => l.id === s.id);
+        if (isDuplicate) return false;
+
+        // 3. Strict Search Filter (Synced with local logic)
+        if (!normalizedSearchText) return true;
+        const lowerName = s.name.toLowerCase();
+        const lowerTrigger = (s.trigger || "").toLowerCase();
+
+        if (lowerName.includes(normalizedSearchText)) return true;
+        if (s.trigger && lowerTrigger.includes(normalizedSearchText))
+          return true;
+
+        if (s.trigger && normalizedSearchText.startsWith(lowerTrigger + " "))
+          return true;
+
+        return false;
+      })
       .sort((a, b) => {
         // Apply same sort logic to global matches?
         // Yes, consisteny is good.
@@ -1020,26 +1043,24 @@ export default function Command() {
     // Actually, count typically should reflect what is visible or what is total.
     // Let's reflect the RECENT list for the counts logic to keep it stable,
     // or maybe the SEARCH list if searching.
-    const listToCount =
-      searchText && searchResults.length > 0
-        ? [...recentSnippets, ...searchResults]
-        : recentSnippets;
-
+    const listToCount = [...localMatches, ...globalMatches];
     listToCount.forEach((s) => {
       if (s.databaseId) {
         counts[s.databaseId] = (counts[s.databaseId] || 0) + 1;
       }
     });
     return counts;
-  }, [recentSnippets, searchResults, searchText]);
+  }, [localMatches, globalMatches]);
 
   return (
     <List
       isLoading={isLoading || isGlobalSearching}
+      filtering={false}
+      searchText={searchText}
       searchBarPlaceholder={`Search in ${selectedDbId === "all" ? "All" : databases.find((d) => d.id === selectedDbId)?.title || "Database"}...`}
       onSearchTextChange={setSearchText}
       isShowingDetail={true}
-      throttle={true}
+      throttle={false}
       selectedItemId={selectedIds[0]} // Optional: Control first item if needed, but safer to let it be uncontrolled or map from IDs?
       // Actually, if I want to support multi-select via state tracking, I need to know how Raycast behaves.
       // Reverting to the previous logic which seemed to work for them:
@@ -1069,7 +1090,7 @@ export default function Command() {
         >
           <List.Dropdown.Section title="Filter Database">
             <List.Dropdown.Item
-              title={`All Snippets (${recentSnippets.length})`}
+              title={`All Snippets (${localMatches.length + globalMatches.length})`}
               value="db_all"
               icon={
                 selectedDbId === "all"
@@ -1136,12 +1157,25 @@ export default function Command() {
       }
     >
       <List.EmptyView
-        title="Sync Status"
-        description={`${dbStatus}\n\nCurrent Configured IDs: ${preferences.databaseIds || ""}`}
+        icon={searchText ? Icon.MagnifyingGlass : Icon.Box}
+        title={searchText ? "No Snippets Found" : "No Snippets Synced"}
+        description={
+          searchText
+            ? `No snippets matching "${searchText}" were found in your Notion databases.`
+            : `${dbStatus}\n\nCurrent Configured IDs: ${preferences.databaseIds || "None"}`
+        }
         actions={
           <ActionPanel>
+            {searchText && (
+              <Action
+                title="Clear Search"
+                icon={Icon.XMarkCircle}
+                onAction={() => setSearchText("")}
+              />
+            )}
             <Action
               title="Open Notion Integration Settings"
+              icon={Icon.Gear}
               onAction={() => open("https://www.notion.so/my-integrations")}
             />
             <Action
@@ -1196,308 +1230,306 @@ export default function Command() {
           </ActionPanel>
         }
       />
-      <List.Section title="Local" subtitle={String(localMatches.length)}>
-        {localMatches.map((index) => {
-          // Load content on demand for preview
-          const cachedContent = contentCacheRef.current.get(index.id);
-          const displayContent =
-            cachedContent?.content || index.contentPreview || "Loading...";
+      {localMatches.length > 0 && (
+        <List.Section title="Local" subtitle={String(localMatches.length)}>
+          {localMatches.map((index) => {
+            // Load content on demand for preview
+            const cachedContent = contentCacheRef.current.get(index.id);
+            const displayContent =
+              cachedContent?.content || index.contentPreview || "Loading...";
 
-          // Parse placeholders from preview or cached content
-          let placeholders: string[] = [];
-          if (cachedContent?.content) {
-            placeholders = parsePlaceholders(cachedContent.content);
-          } else if (index.contentPreview) {
-            placeholders = parsePlaceholders(index.contentPreview);
-          }
+            // Parse placeholders from preview or cached content
+            let placeholders: string[] = [];
+            if (cachedContent?.content) {
+              placeholders = parsePlaceholders(cachedContent.content);
+            } else if (index.contentPreview) {
+              placeholders = parsePlaceholders(index.contentPreview);
+            }
 
-          // Use helper for highlighting
-          const highlightedContent = highlightContent(
-            displayContent,
-            searchText,
-            index.preview,
-          );
+            // Use helper for highlighting
+            const highlightedContent = highlightContent(
+              displayContent,
+              searchText,
+              index.preview,
+            );
 
-          // Add loading indicator if content is not fully loaded
-          if (
-            !cachedContent &&
-            index.contentLength &&
-            index.contentLength > 500
-          ) {
-            // highlightedContent += "\n\n*[Click to load full content]*";
-          }
+            // Add loading indicator if content is not fully loaded
+            if (
+              !cachedContent &&
+              index.contentLength &&
+              index.contentLength > 500
+            ) {
+              // highlightedContent += "\n\n*[Click to load full content]*";
+            }
 
-          // Find db info efficiently
-          const dbInfo = databases.find((d) => d.id === index.databaseId);
+            // Find db info efficiently
+            const dbInfo = databases.find((d) => d.id === index.databaseId);
 
-          return (
-            <List.Item
-              key={index.id}
-              id={index.id}
-              icon={
-                dbInfo?.icon ||
-                (index.typeColor
-                  ? { source: Icon.Dot, tintColor: index.typeColor as Color }
-                  : Icon.Dot)
-              }
-              title={index.name}
-              keywords={[
-                ...(index.trigger ? [index.trigger] : []),
-                ...(index.description
-                  ? index.description.split(" ").slice(0, 5)
-                  : []), // Add first few words of description
-                ...(index.contentPreview
-                  ? [index.contentPreview.substring(0, 50)]
-                  : []), // Add start of content for search
-              ]}
-              accessories={[
-                ...(index.type
-                  ? [
-                      {
-                        tag: {
-                          value: index.type,
-                          color: index.typeColor as Color,
+            return (
+              <List.Item
+                key={index.id}
+                id={index.id}
+                icon={
+                  dbInfo?.icon ||
+                  (index.typeColor
+                    ? { source: Icon.Dot, tintColor: index.typeColor as Color }
+                    : Icon.Dot)
+                }
+                title={index.name}
+                keywords={[...(index.trigger ? [index.trigger] : [])]}
+                accessories={[
+                  ...(index.type
+                    ? [
+                        {
+                          tag: {
+                            value: index.type,
+                            color: index.typeColor as Color,
+                          },
+                          tooltip: index.name,
                         },
-                        tooltip: index.name,
-                      },
-                    ]
-                  : []),
-                ...(index.trigger
-                  ? [
-                      {
-                        tag: { value: index.trigger, color: Color.Blue },
-                        tooltip: index.name,
-                      },
-                    ]
-                  : []),
-              ]}
-              detail={
-                <List.Item.Detail
-                  markdown={highlightedContent}
-                  metadata={
-                    showMetadata ? (
-                      <List.Item.Detail.Metadata>
-                        <List.Item.Detail.Metadata.Label title="Information" />
-                        <List.Item.Detail.Metadata.Label
-                          title="Name"
-                          text={index.name}
-                        />
-                        {index.type && (
-                          <List.Item.Detail.Metadata.TagList title="Type">
-                            <List.Item.Detail.Metadata.TagList.Item
-                              text={index.type}
-                              color={index.typeColor as Color}
-                            />
-                          </List.Item.Detail.Metadata.TagList>
-                        )}
-                        {index.status && (
-                          <List.Item.Detail.Metadata.TagList title="Status">
-                            <List.Item.Detail.Metadata.TagList.Item
-                              text={index.status}
-                              color={index.statusColor as Color}
-                            />
-                          </List.Item.Detail.Metadata.TagList>
-                        )}
-                        {index.trigger && (
+                      ]
+                    : []),
+                  ...(index.trigger
+                    ? [
+                        {
+                          tag: { value: index.trigger, color: Color.Blue },
+                          tooltip: index.name,
+                        },
+                      ]
+                    : []),
+                ]}
+                detail={
+                  <List.Item.Detail
+                    markdown={highlightedContent}
+                    metadata={
+                      showMetadata ? (
+                        <List.Item.Detail.Metadata>
+                          <List.Item.Detail.Metadata.Label title="Information" />
                           <List.Item.Detail.Metadata.Label
-                            title="Trigger"
-                            text={index.trigger}
+                            title="Name"
+                            text={index.name}
                           />
-                        )}
-
-                        <List.Item.Detail.Metadata.Separator />
-                        <List.Item.Detail.Metadata.Label
-                          title="Usage"
-                          text={`${index.usageCount || 0} times`}
-                          icon={Icon.BarChart}
-                        />
-                        {index.lastUsed && (
-                          <List.Item.Detail.Metadata.Label
-                            title="Last Used"
-                            text={new Date(index.lastUsed).toLocaleString()}
-                            icon={Icon.Clock}
-                          />
-                        )}
-
-                        {placeholders.length > 0 && (
-                          <>
-                            <List.Item.Detail.Metadata.Separator />
-                            <List.Item.Detail.Metadata.Label title="Variables" />
-                            {placeholders.map((p) => (
-                              <List.Item.Detail.Metadata.Label
-                                key={p}
-                                title={p}
-                                icon={{
-                                  source: Icon.Pencil,
-                                  tintColor: Color.Orange,
-                                }}
+                          {index.type && (
+                            <List.Item.Detail.Metadata.TagList title="Type">
+                              <List.Item.Detail.Metadata.TagList.Item
+                                text={index.type}
+                                color={index.typeColor as Color}
                               />
-                            ))}
-                          </>
-                        )}
+                            </List.Item.Detail.Metadata.TagList>
+                          )}
+                          {index.status && (
+                            <List.Item.Detail.Metadata.TagList title="Status">
+                              <List.Item.Detail.Metadata.TagList.Item
+                                text={index.status}
+                                color={index.statusColor as Color}
+                              />
+                            </List.Item.Detail.Metadata.TagList>
+                          )}
+                          {index.trigger && (
+                            <List.Item.Detail.Metadata.Label
+                              title="Trigger"
+                              text={index.trigger}
+                            />
+                          )}
 
-                        <List.Item.Detail.Metadata.Separator />
-                        <List.Item.Detail.Metadata.Label
-                          title="Source"
-                          text={dbInfo?.title || "Unknown"}
-                          icon={dbInfo?.icon}
-                        />
-                      </List.Item.Detail.Metadata>
-                    ) : undefined
-                  }
-                />
-              }
-              actions={
-                <ActionPanel>
-                  <ActionPanel.Section>
-                    <Action
-                      title="Paste Snippet"
-                      icon={Icon.Clipboard}
-                      onAction={() => handleSelect(index)}
-                    />
-                    <Action
-                      title={showMetadata ? "Hide Metadata" : "Show Metadata"}
-                      icon={showMetadata ? Icon.EyeDisabled : Icon.Eye}
-                      shortcut={{ modifiers: ["cmd", "shift"], key: "d" }}
-                      onAction={() => setShowMetadata(!showMetadata)}
-                    />
-                    <Action
-                      title="Refresh Snippets"
-                      icon={Icon.ArrowClockwise}
-                      shortcut={{ modifiers: ["cmd"], key: "r" }}
-                      onAction={refreshSnippets}
-                    />
-                    <Action
-                      title="Open in Notion"
-                      icon={Icon.Link}
-                      shortcut={{ modifiers: ["cmd"], key: "n" }}
-                      onAction={() => {
-                        if (index.url) {
-                          open(index.url);
-                        } else {
-                          showToast({
-                            style: Toast.Style.Failure,
-                            title: "No URL",
-                            message: "This snippet doesn't have a Notion URL",
-                          });
-                        }
-                      }}
-                    />
-                    <Action
-                      title="Import to Raycast Snippets"
-                      icon={Icon.Snippets}
-                      shortcut={{ modifiers: ["cmd", "shift"], key: "i" }}
-                      onAction={async () => {
-                        await showToast({
-                          style: Toast.Style.Animated,
-                          title: "Preparing Import...",
-                        });
-                        const content = await loadSnippetContent(index);
-                        if (!content) {
+                          <List.Item.Detail.Metadata.Separator />
+                          <List.Item.Detail.Metadata.Label
+                            title="Usage"
+                            text={`${index.usageCount || 0} times`}
+                            icon={Icon.BarChart}
+                          />
+                          {index.lastUsed && (
+                            <List.Item.Detail.Metadata.Label
+                              title="Last Used"
+                              text={new Date(index.lastUsed).toLocaleString()}
+                              icon={Icon.Clock}
+                            />
+                          )}
+
+                          {placeholders.length > 0 && (
+                            <>
+                              <List.Item.Detail.Metadata.Separator />
+                              <List.Item.Detail.Metadata.Label title="Variables" />
+                              {placeholders.map((p) => (
+                                <List.Item.Detail.Metadata.Label
+                                  key={p}
+                                  title={p}
+                                  icon={{
+                                    source: Icon.Pencil,
+                                    tintColor: Color.Orange,
+                                  }}
+                                />
+                              ))}
+                            </>
+                          )}
+
+                          <List.Item.Detail.Metadata.Separator />
+                          <List.Item.Detail.Metadata.Label
+                            title="Source"
+                            text={dbInfo?.title || "Unknown"}
+                            icon={dbInfo?.icon}
+                          />
+                        </List.Item.Detail.Metadata>
+                      ) : undefined
+                    }
+                  />
+                }
+                actions={
+                  <ActionPanel>
+                    <ActionPanel.Section>
+                      <Action
+                        title="Paste Snippet"
+                        icon={Icon.Clipboard}
+                        onAction={() => handleSelect(index)}
+                      />
+                      <Action
+                        title={showMetadata ? "Hide Metadata" : "Show Metadata"}
+                        icon={showMetadata ? Icon.EyeDisabled : Icon.Eye}
+                        shortcut={{ modifiers: ["cmd", "shift"], key: "d" }}
+                        onAction={() => setShowMetadata(!showMetadata)}
+                      />
+                      <Action
+                        title="Refresh Snippets"
+                        icon={Icon.ArrowClockwise}
+                        shortcut={{ modifiers: ["cmd"], key: "r" }}
+                        onAction={refreshSnippets}
+                      />
+                      <Action
+                        title="Open in Notion"
+                        icon={Icon.Link}
+                        shortcut={{ modifiers: ["cmd"], key: "n" }}
+                        onAction={() => {
+                          if (index.url) {
+                            open(index.url);
+                          } else {
+                            showToast({
+                              style: Toast.Style.Failure,
+                              title: "No URL",
+                              message: "This snippet doesn't have a Notion URL",
+                            });
+                          }
+                        }}
+                      />
+                      <Action
+                        title="Import to Raycast Snippets"
+                        icon={Icon.Snippets}
+                        shortcut={{ modifiers: ["cmd", "shift"], key: "i" }}
+                        onAction={async () => {
                           await showToast({
-                            style: Toast.Style.Failure,
-                            title: "Failed to load content",
+                            style: Toast.Style.Animated,
+                            title: "Preparing Import...",
                           });
-                          return;
-                        }
+                          const content = await loadSnippetContent(index);
+                          if (!content) {
+                            await showToast({
+                              style: Toast.Style.Failure,
+                              title: "Failed to load content",
+                            });
+                            return;
+                          }
 
-                        // Try 'context' with multiple potential keys to hit the correct one
-                        const launchContext = {
-                          name: index.name,
-                          title: index.name,
-                          snippet: content,
-                          text: content,
-                          content: content,
-                          keyword: index.trigger || "",
-                          type: "snippet",
-                        };
-                        const url = `raycast://extensions/raycast/snippets/create-snippet?context=${encodeURIComponent(JSON.stringify(launchContext))}`;
-                        await open(url);
-                        await showToast({
-                          style: Toast.Style.Success,
-                          title: "Import Window Opened",
-                        });
-                      }}
-                    />
-                    <Action
-                      title="Edit Snippet"
-                      icon={Icon.Pencil}
-                      shortcut={{ modifiers: ["cmd"], key: "e" }}
-                      onAction={async () => {
-                        const content = await loadSnippetContent(index);
-                        const fullSnippet = snippetIndexToSnippet(
-                          index,
-                          content,
-                        );
-                        push(
-                          <SnippetForm
-                            snippet={fullSnippet}
-                            onSuccess={refreshSnippets}
-                          />,
-                        );
-                      }}
-                    />
-                    <Action
-                      title="Delete Snippet"
-                      icon={Icon.Trash}
-                      shortcut={{ modifiers: ["ctrl"], key: "x" }}
-                      style={Action.Style.Destructive}
-                      onAction={() => handleDelete(index)}
-                    />
-                  </ActionPanel.Section>
-                  <ActionPanel.Section title="Sync & Export">
-                    <Action
-                      title="Force Full Re-sync"
-                      icon={Icon.Warning}
-                      shortcut={{ modifiers: ["cmd", "shift"], key: "r" }}
-                      onAction={forceReSync}
-                    />
-                    <Action
-                      title="Export All Snippets"
-                      icon={Icon.Download}
-                      shortcut={{ modifiers: ["cmd", "shift"], key: "e" }}
-                      onAction={exportSelectedAndReveal}
-                    />
-                    <Action
-                      title="Copy Raw Content"
-                      icon={Icon.Clipboard}
-                      onAction={async () => {
-                        const content = await loadSnippetContent(index);
-                        await Clipboard.copy(content);
-                        showToast({
-                          style: Toast.Style.Success,
-                          title: "Content copied",
-                        });
-                      }}
-                    />
-                  </ActionPanel.Section>
-                  <ActionPanel.Section title="Sort Options">
-                    <Action
-                      title="Sort by Most Used"
-                      icon={sortBy === "usage" ? Icon.CheckCircle : Icon.Circle}
-                      onAction={() => setSortBy("usage")}
-                    />
-                    <Action
-                      title="Sort by Recently Used"
-                      icon={
-                        sortBy === "last-used" ? Icon.CheckCircle : Icon.Circle
-                      }
-                      onAction={() => setSortBy("last-used")}
-                    />
-                    <Action
-                      title="Sort by Created Date"
-                      icon={
-                        sortBy === "created" ? Icon.CheckCircle : Icon.Circle
-                      }
-                      onAction={() => setSortBy("created")}
-                    />
-                  </ActionPanel.Section>
-                </ActionPanel>
-              }
-            />
-          );
-        })}
-      </List.Section>
+                          // Try 'context' with multiple potential keys to hit the correct one
+                          const launchContext = {
+                            name: index.name,
+                            title: index.name,
+                            snippet: content,
+                            text: content,
+                            content: content,
+                            keyword: index.trigger || "",
+                            type: "snippet",
+                          };
+                          const url = `raycast://extensions/raycast/snippets/create-snippet?context=${encodeURIComponent(JSON.stringify(launchContext))}`;
+                          await open(url);
+                          await showToast({
+                            style: Toast.Style.Success,
+                            title: "Import Window Opened",
+                          });
+                        }}
+                      />
+                      <Action
+                        title="Edit Snippet"
+                        icon={Icon.Pencil}
+                        shortcut={{ modifiers: ["cmd"], key: "e" }}
+                        onAction={async () => {
+                          const content = await loadSnippetContent(index);
+                          const fullSnippet = snippetIndexToSnippet(
+                            index,
+                            content,
+                          );
+                          push(
+                            <SnippetForm
+                              snippet={fullSnippet}
+                              onSuccess={refreshSnippets}
+                            />,
+                          );
+                        }}
+                      />
+                      <Action
+                        title="Delete Snippet"
+                        icon={Icon.Trash}
+                        shortcut={{ modifiers: ["ctrl"], key: "x" }}
+                        style={Action.Style.Destructive}
+                        onAction={() => handleDelete(index)}
+                      />
+                    </ActionPanel.Section>
+                    <ActionPanel.Section title="Sync & Export">
+                      <Action
+                        title="Force Full Re-sync"
+                        icon={Icon.Warning}
+                        shortcut={{ modifiers: ["cmd", "shift"], key: "r" }}
+                        onAction={forceReSync}
+                      />
+                      <Action
+                        title="Export All Snippets"
+                        icon={Icon.Download}
+                        shortcut={{ modifiers: ["cmd", "shift"], key: "e" }}
+                        onAction={exportSelectedAndReveal}
+                      />
+                      <Action
+                        title="Copy Raw Content"
+                        icon={Icon.Clipboard}
+                        onAction={async () => {
+                          const content = await loadSnippetContent(index);
+                          await Clipboard.copy(content);
+                          showToast({
+                            style: Toast.Style.Success,
+                            title: "Content copied",
+                          });
+                        }}
+                      />
+                    </ActionPanel.Section>
+                    <ActionPanel.Section title="Sort Options">
+                      <Action
+                        title="Sort by Most Used"
+                        icon={
+                          sortBy === "usage" ? Icon.CheckCircle : Icon.Circle
+                        }
+                        onAction={() => setSortBy("usage")}
+                      />
+                      <Action
+                        title="Sort by Recently Used"
+                        icon={
+                          sortBy === "last-used"
+                            ? Icon.CheckCircle
+                            : Icon.Circle
+                        }
+                        onAction={() => setSortBy("last-used")}
+                      />
+                      <Action
+                        title="Sort by Created Date"
+                        icon={
+                          sortBy === "created" ? Icon.CheckCircle : Icon.Circle
+                        }
+                        onAction={() => setSortBy("created")}
+                      />
+                    </ActionPanel.Section>
+                  </ActionPanel>
+                }
+              />
+            );
+          })}
+        </List.Section>
+      )}
 
       {/* Global Matches Section */}
       {globalMatches.length > 0 && (
@@ -1549,15 +1581,7 @@ export default function Command() {
                 }
                 title={snippet.name}
                 // Unified Keywords/Accessories
-                keywords={[
-                  ...(snippet.trigger ? [snippet.trigger] : []),
-                  ...(snippet.description
-                    ? snippet.description.split(" ").slice(0, 5)
-                    : []),
-                  ...(snippet.contentPreview
-                    ? [snippet.contentPreview.substring(0, 50)]
-                    : []),
-                ]}
+                keywords={[...(snippet.trigger ? [snippet.trigger] : [])]}
                 accessories={[
                   ...(snippet.type
                     ? [
