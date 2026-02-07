@@ -1162,7 +1162,7 @@ export default function Command() {
         description={
           searchText
             ? `No snippets matching "${searchText}" were found in your Notion databases.`
-            : `${dbStatus}\n\nCurrent Configured IDs: ${preferences.databaseIds || "None"}`
+            : `${dbStatus}\n\nCheck Extension Preferences to configure Database IDs.`
         }
         actions={
           <ActionPanel>
