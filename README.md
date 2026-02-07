@@ -11,11 +11,11 @@ Support **Hybrid Search** (Local Instant + Global Cloud) and **Import to Raycast
 
 ## 📸 Screenshots
 
-<img src="metadata/screenshot-1.png" width="100%" />
-<img src="metadata/screenshot-2.png" width="100%" />
-<img src="metadata/screenshot-3.png" width="100%" />
-<img src="metadata/screenshot-4.png" width="100%" />
-<img src="metadata/screenshot-5.png" width="100%" />
+<img src="marketing/screenshot-1.png" width="100%" />
+<img src="marketing/screenshot-2.png" width="100%" />
+<img src="marketing/screenshot-3.png" width="100%" />
+<img src="marketing/screenshot-4.png" width="100%" />
+<img src="marketing/screenshot-5.png" width="100%" />
 
 <br/>
 
