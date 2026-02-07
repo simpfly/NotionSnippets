@@ -11,12 +11,9 @@ Support **Hybrid Search** (Local Instant + Global Cloud) and **Import to Raycast
 
 ## 📸 Screenshots
 
-<img src="marketing/screenshot-1.png" width="100%" />
-<img src="marketing/screenshot-2.png" width="100%" />
-<img src="marketing/screenshot-3.png" width="100%" />
-<img src="marketing/screenshot-4.png" width="100%" />
-<img src="marketing/screenshot-5.png" width="100%" />
-
+<img src="metadata/screenshot1.png" width="100%" />
+<img src="metadata/screenshot2.png" width="100%" />
+<img src="metadata/screenshot3.png" width="100%" />
 <br/>
 
 ## ✨ Features
